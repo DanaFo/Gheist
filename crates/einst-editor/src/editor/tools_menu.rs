@@ -15,6 +15,8 @@ pub(crate) enum MainAction {
     FindMissing,
     Export,
     MidiConsole,
+    Performance,
+    PowerHold,
     TransportOptions,
     ResetScale,
     /// Reset, confirmed.
@@ -22,14 +24,70 @@ pub(crate) enum MainAction {
     None,
 }
 
+/// Options key: the CPU and memory readout is on (off by default).
+pub(crate) const PERF_OPTION: &str = "ShowPerformance";
+
+/// Options key: hold the performance power profile while the standalone
+/// plays (Linux; on by default).
+pub(crate) const POWER_OPTION: &str = "HoldPerformanceWhilePlaying";
+
 impl Editor {
+    /// The power-profile hold is offered: the Linux standalone.
+    fn power_hold_offered(&self) -> bool {
+        cfg!(target_os = "linux") && self.devices.host.is_some()
+    }
+
+    /// Its menu item, checked while on.
+    fn power_hold_item(&self) -> String {
+        let label = "Keep the CPU at full speed while playing";
+        if self.modals.options.bool(POWER_OPTION, true) { format!("{}{label}", dreist_gui::menu::CHECK) } else { label.into() }
+    }
+
+    fn toggle_power_hold(&mut self) {
+        let on = !self.modals.options.bool(POWER_OPTION, true);
+        self.modals.options.set(POWER_OPTION, on);
+        if !cfg!(test) {
+            self.modals.options.save();
+        }
+        if let Some(h) = &self.devices.host {
+            h.power_hold(on);
+        }
+    }
+
+    /// The CPU and memory readout is on.
+    pub fn perf_shown(&self) -> bool {
+        self.modals.options.bool(PERF_OPTION, false)
+    }
+
+    /// Show `r` in the readout, adding or removing it to match the option
+    /// (the app calls this about once a second).
+    pub fn performance(&mut self, r: &dreist_gui::perf::Reading) {
+        self.place_perf();
+        if self.perf_shown() {
+            dreist_gui::perf::update(&mut self.app, r);
+        }
+    }
+
+    /// Add or remove the readout to match the option, in a strip taken
+    /// from the bottom of the browser's list area (kept every frame through
+    /// splitters and window sizes); hidden while that area is not shown.
+    pub fn place_perf(&mut self) {
+        let on = self.perf_shown();
+        let list = self.browser.as_ref().map(|b| b.page().to_vec()).and_then(|page| Some([&page[..], &self.app.ctrl(&page)?.path_of("SplitView")?[..]].concat()));
+        let strip = list.and_then(|p| dreist_gui::perf::reserve_below(&mut self.app, &p, on));
+        dreist_gui::perf::show(&mut self.app, on);
+        if on {
+            dreist_gui::perf::place(&mut self.app, strip.unwrap_or_default());
+        }
+    }
+
     fn main_items(&self) -> Vec<(String, MainAction)> {
         use MainAction::*;
         // v1's Grid menu ([re:3695e4]): About, Preferences, Reset, the
         // default preset items (Clear only when there is one); then the
         // port's own items.
         let has_default = crate::options::default_preset().is_some_and(|p| p.is_file());
-        vec![
+        let mut items = vec![
             (format!("About {}", crate::product()), About),
             (String::new(), None),
             ("Preferences".into(), Preferences),
@@ -42,8 +100,13 @@ impl Editor {
             ("Find missing files...".into(), FindMissing),
             ("Export as audio...".into(), Export),
             ("Show MIDI console".into(), MidiConsole),
+            (if self.perf_shown() { "Hide CPU and memory" } else { "Show CPU and memory" }.into(), Performance),
             ("Reset UI scale to 100%".into(), ResetScale),
-        ]
+        ];
+        if self.power_hold_offered() {
+            items.push((self.power_hold_item(), PowerHold));
+        }
+        items
     }
 
     /// The main menu (`GridButton`).
@@ -128,6 +191,19 @@ impl Editor {
                     }
                     // Lambda #8: scale 1 (when not already);
                     // LastEditorScaleFactor 100.
+                    MainAction::Performance => {
+                        let on = !self.perf_shown();
+                        self.modals.options.set(PERF_OPTION, on);
+                        if !cfg!(test) {
+                            self.modals.options.save();
+                        }
+                        self.place_perf();
+                        return false;
+                    }
+                    MainAction::PowerHold => {
+                        self.toggle_power_hold();
+                        return false;
+                    }
                     MainAction::ResetScale => {
                         if (self.app.ui_scale - 1.0).abs() > 1e-6 {
                             self.modals.options.set("LastEditorScaleFactor", 100);

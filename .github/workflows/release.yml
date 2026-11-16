@@ -1,17 +1,32 @@
 name: Release
 
-# Pushing a tag `vX.Y.Z` tests and builds Einst (VST3, CLAP, standalone) on
-# macOS and publishes the GitHub release with the zips. A manual run builds
-# the checked-out ref and publishes to `tag` only when `upload` is set.
+# Releases a tag `vX.Y.Z`: checks that commons is a dreist-commons release,
+# checks the commit subjects, tests and builds Einst (VST3, CLAP, standalone)
+# on macOS, Windows and Linux with the tag's version written into Cargo.toml
+# and publishes the GitHub release with the zips (tarballs on Linux). Called by release-on-main.yml once it has
+# tagged the merge of a release pull request; also runs on a tag pushed by
+# hand (a tag pushed by release-on-main.yml with GITHUB_TOKEN starts no
+# second run) and by hand (`workflow_dispatch`: builds the checked-out ref,
+# uploads to `tag` only when `upload` is set). No workflow runs on other
+# branch pushes (CONTRIBUTING.md).
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag"
+        type: string
+        required: true
+      upload:
+        description: "Upload the zips to the release"
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       tag:
         description: "Release tag (names the zips; the upload target)"
         required: true
-        default: "v0.1.0"
       upload:
         description: "Upload the zips to the release"
         type: boolean
@@ -22,69 +37,135 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  TAG: ${{ github.event_name == 'push' && github.ref_name || inputs.tag || 'dev' }}
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
+  commons:
+    # The submodule must be the commit of a dreist-commons release tag.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+      - name: commons is a dreist-commons release
+        run: .github/release/check-commons.sh
+
   commits:
     uses: ./.github/workflows/commits.yml
 
   build:
-    runs-on: macos-15
+    needs: [commons, commits]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            name: macOS
+          - os: windows-latest
+            name: Windows
+          - os: ubuntu-24.04
+            name: Linux
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - name: Version from the tag
+        # Only in this checkout: the plugins, the app's Info.plist and the
+        # About panel show it.
+        run: |
+          if [[ $TAG =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            .github/release/stamp-version.sh "$TAG"
+          fi
+      - name: System packages (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # The runners' Azure mirror sometimes stops resolving; install from the main archive.
+          sudo sed -i -e 's|mirror+file:/etc/apt/apt-mirrors.txt|http://archive.ubuntu.com/ubuntu/|g' \
+            -e 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get install -y --no-install-recommends pkg-config libasound2-dev libjack-jackd2-dev libx11-dev libx11-xcb-dev libxcb1-dev libxcb-icccm4-dev libxcb-dri2-0-dev libxcursor-dev libgl1-mesa-dev xvfb
       - name: Test
-        run: cargo test --locked --workspace
-      - name: Build
+        # The effect fingerprints match on macOS only (float output differs).
+        run: ${{ runner.os == 'Linux' && 'xvfb-run -a ' || '' }}cargo test --locked --workspace ${{ runner.os != 'macOS' && '-- --skip effects_match_fingerprints' || '' }}
+      - name: Build (macOS)
+        if: runner.os == 'macOS'
         run: |
           scripts/build.sh
           cd target/bundled
-          ditto -c -k --keepParent Einst.vst3 "Einst-$TAG-macOS-VST3.zip"
-          ditto -c -k --keepParent Einst.clap "Einst-$TAG-macOS-CLAP.zip"
-          ditto -c -k --keepParent Einst.app "Einst-$TAG-macOS-App.zip"
+          ditto -c -k --keepParent Einst.vst3 "Einst-$TAG-${{ matrix.name }}-VST3.zip"
+          ditto -c -k --keepParent Einst.clap "Einst-$TAG-${{ matrix.name }}-CLAP.zip"
+          ditto -c -k --keepParent Einst.app "Einst-$TAG-${{ matrix.name }}-App.zip"
+          # Everything with install.sh (commons/packaging) in one folder.
+          full="Einst-$TAG-${{ matrix.name }}"
+          mkdir "$full"
+          for p in install.sh Einst.vst3 Einst.clap Einst.app; do ditto "$p" "$full/$p"; done
+          ditto -c -k --keepParent "$full" "$full.zip"
+      - name: Build (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          scripts/build-windows.sh
+          cd target/bundled
+          mv Einst-CLAP Einst && 7z a -tzip "Einst-$TAG-${{ matrix.name }}-CLAP.zip" Einst && mv Einst Einst-CLAP
+          mv Einst-App Einst && 7z a -tzip "Einst-$TAG-${{ matrix.name }}-App.zip" Einst && mv Einst Einst-App
+          7z a -tzip "Einst-$TAG-${{ matrix.name }}-VST3.zip" Einst.vst3
+          # Everything with install.ps1 (commons/packaging) in one folder.
+          full="Einst-$TAG-${{ matrix.name }}"
+          mkdir "$full" && cp -R install.ps1 Einst.vst3 Einst-CLAP Einst-App "$full/"
+          7z a -tzip "$full.zip" "$full"
+      - name: Build (Linux)
+        # tar keeps the executable bits; the CLAP and the app unpack into an
+        # Einst/ folder each, the full archive into Einst-<tag>-Linux/ with
+        # install.sh (README: Linux).
+        if: runner.os == 'Linux'
+        run: |
+          scripts/build-linux.sh
+          cd target/bundled
+          tar -czf "Einst-$TAG-${{ matrix.name }}-VST3.tar.gz" Einst.vst3
+          tar -czf "Einst-$TAG-${{ matrix.name }}-CLAP.tar.gz" --transform 's,^Einst-CLAP,Einst,' Einst-CLAP
+          tar -czf "Einst-$TAG-${{ matrix.name }}-App.tar.gz" --transform 's,^Einst-App,Einst,' Einst-App
+          # Everything with install.sh (commons/packaging) in one folder.
+          tar -czf "Einst-$TAG-${{ matrix.name }}.tar.gz" --transform "s,^,Einst-$TAG-${{ matrix.name }}/," install.sh Einst.vst3 Einst-CLAP Einst-App
       - uses: actions/upload-artifact@v7
         with:
-          name: Einst-${{ env.TAG }}-macOS
-          path: target/bundled/Einst-*.zip
+          name: Einst-${{ env.TAG }}-${{ matrix.name }}
+          path: |
+            target/bundled/Einst-*.zip
+            target/bundled/Einst-*.tar.gz
           retention-days: 7
 
   release:
-    # The tag's CHANGELOG.md section is the release notes; without one,
-    # git-cliff generates them from the commits since the previous tag.
-    needs: [commits, build]
-    if: github.event_name == 'push' || inputs.upload
+    # The notes are the tag's changelog section, generated from the commits
+    # since the previous tag (.github/release/notes.sh, cliff.toml).
+    needs: build
+    if: inputs.upload || (github.event_name == 'push' && github.ref_type == 'tag')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: git-cliff
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
-      - name: Release notes from CHANGELOG.md
-        id: notes
-        run: |
-          awk -v v="${TAG#v}" '/^## \[/ { p = index($0, "## [" v "]") == 1; next } p' CHANGELOG.md > notes.md || true
-          if [ -s notes.md ]; then echo "found=true" >> "$GITHUB_OUTPUT"; fi
-      - name: Release notes from the commits
-        if: steps.notes.outputs.found != 'true'
-        uses: orhun/git-cliff-action@v4
-        with:
-          config: cliff.toml
-          args: --latest --strip all
-        env:
-          OUTPUT: notes.md
+      - name: Release notes
+        run: .github/release/notes.sh "$TAG" > notes.md
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
+          TITLE: ${{ github.event.repository.name }} ${{ env.TAG }}
         run: |
           if gh release view "$TAG" > /dev/null 2>&1; then
             gh release edit "$TAG" --notes-file notes.md
           else
-            gh release create "$TAG" --verify-tag --title "${{ github.event.repository.name }} $TAG" --notes-file notes.md
+            gh release create "$TAG" --verify-tag --title "$TITLE" --notes-file notes.md
           fi
-          gh release upload "$TAG" dist/*.zip --clobber
+          gh release upload "$TAG" dist/*.zip dist/*.tar.gz --clobber

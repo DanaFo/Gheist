@@ -274,7 +274,7 @@ impl Plugin for EinstPlugin {
     fn editor(&mut self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
         // Option `StyleSheet` (Preferences › UI style; `EINST_THEME` overrides).
         let theme = std::env::var("EINST_THEME").unwrap_or_else(|_| einst_editor::options::Options::load().string("StyleSheet", dreist_gui::skin::default_theme()));
-        Some(Box::new(editor::DreistEditor { bridge: self.bridge.clone(), theme, params: self.params.clone(), size: self.editor_size.clone() }))
+        Some(Box::new(editor::DreistEditor { bridge: self.bridge.clone(), theme, params: self.params.clone(), size: self.editor_size.clone(), host_scale: 1.0f32.to_bits().into() }))
     }
 
     fn initialize(&mut self, _layout: &AudioIOLayout, buffer_config: &BufferConfig, _context: &mut impl InitContext<Self>) -> bool {
@@ -374,8 +374,19 @@ impl Plugin for EinstPlugin {
     }
 
     fn process(&mut self, buffer: &mut Buffer, aux: &mut AuxiliaryBuffers, context: &mut impl ProcessContext<Self>) -> ProcessStatus {
+        // The readout's audio load: this block's time against its duration.
+        let bridge = self.bridge.clone();
+        let rate = f32::from_bits(bridge.sample_rate.load(std::sync::atomic::Ordering::Relaxed));
+        let _load = bridge.load.scope(buffer.samples(), rate);
+        // A debug run's monitor (`dreist_engine::diag`), when on.
+        let diag = dreist_engine::diag::monitor();
+        let _diag = diag.map(|m| m.block(buffer.samples(), rate));
+        bridge.standalone.store(context.plugin_api() == nih_plug::prelude::PluginApi::Standalone, std::sync::atomic::Ordering::Relaxed);
         self.swap_in_rebuilt();
         let Some(engine) = self.engine.as_mut() else { return ProcessStatus::Normal };
+        if diag.is_some_and(|m| m.take_play()) {
+            engine.start();
+        }
         // The standalone has no host transport: nih-plug's backend reports
         // "playing at 120 BPM" every block, so the original runs its own (Play /
         // Stop, the project tempo), as the original standalone shell does.
@@ -423,6 +434,16 @@ impl Plugin for EinstPlugin {
                     spent.append(&mut self.applied);
                 }
             }
+        }
+        // The standalone holds the performance power profile while playing
+        // (`dreist_host::power`; a flag here, the D-Bus calls elsewhere).
+        if bridge.standalone.load(std::sync::atomic::Ordering::Relaxed) {
+            dreist_host::power::set_playing(engine.is_playing());
+        }
+        if let Some(m) = diag {
+            m.set_transport(engine.song_position(), engine.is_playing());
+            let (voices, stretching) = engine.voice_counts();
+            m.set_voices(voices, stretching);
         }
         if let Ok(mut s) = self.bridge.state.try_lock() {
             s.playing = engine.is_playing();
@@ -532,6 +553,9 @@ impl Plugin for EinstPlugin {
         });
         let input = [&self.input_scratch[0][..n], &self.input_scratch[1][..n]];
         engine.process_with_input(left, right, &mut subs, Some(input));
+        if let Some(m) = diag {
+            m.output(left, right);
+        }
         for &(t, [st, d1, d2]) in &engine.midi_out {
             let (timing, channel) = (t.min(n.saturating_sub(1) as u32), st & 15);
             match st & 0xf0 {

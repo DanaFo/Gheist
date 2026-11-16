@@ -171,6 +171,11 @@ pub struct Bridge {
     /// Decoded sample bytes of the latest built engine, for the master
     /// display's memory readout.
     pub sample_bytes: AtomicU64,
+    /// The audio thread's load, for the CPU and memory readout.
+    pub load: dreist_engine::load::DspLoad,
+    /// Running as the standalone app (late blocks are dropouts there; a
+    /// host may call irregularly).
+    pub standalone: std::sync::atomic::AtomicBool,
 }
 
 /// A lock that survives a panic elsewhere (the data is plain state).
@@ -353,6 +358,9 @@ pub struct DreistEditor {
     /// The window size the editor last asked for (pixels; 0 = from the
     /// options), what `size()` reports to the host.
     pub size: Arc<std::sync::atomic::AtomicU64>,
+    /// The host's scale factor (`f32` bits; Windows and Linux, see
+    /// `set_scale_factor`).
+    pub host_scale: std::sync::atomic::AtomicU32,
 }
 
 /// The window's size: v1's fixed size × the UI scale
@@ -455,7 +463,10 @@ impl Editor for DreistEditor {
         // The last previews' samples: the audio thread may still be playing
         // one, and must not be the one to free it.
         let mut previews: std::collections::VecDeque<Arc<dreist_dsp::voice::SampleData>> = Default::default();
+        let mut trace = DirtyTrace::new();
+        let mut perf = PerfFeed::default();
         let link = Box::new(move |ed: &mut DreistGui, cmds: Vec<Command>| {
+            trace.begin(ed);
             // A new UI scale: ask the host for the new size (`size()` reads it).
             if ed.app.resize_request {
                 let (w, h) = ed.app.size();
@@ -500,7 +511,7 @@ impl Editor for DreistEditor {
                                     // Pattern export: show the file (the original offers it for dragging).
                                     if reveal {
                                         if let Some(f) = r.files.first() {
-                                            let _ = std::process::Command::new("open").arg("-R").arg(f).spawn();
+                                            dreist_host::shell::reveal(&[f]);
                                         }
                                     }
                                 }
@@ -526,6 +537,7 @@ impl Editor for DreistEditor {
             // The standalone's menu bar.
             for tag in dreist_gui::menubar::take() {
                 ed.menu_command(tag);
+                trace.check(ed, "menu_command");
             }
             // A document from the plugin side (session restore, reload).
             let doc_gen = bridge.doc_gen.load(std::sync::atomic::Ordering::Acquire);
@@ -534,6 +546,7 @@ impl Editor for DreistEditor {
                     seen_gen = doc_gen;
                     ed.model.samples = bridge.samples.lock().ok().and_then(|s| s.clone());
                     ed.set_document(doc);
+                    trace.check(ed, "set_document");
                 }
             }
             // About twice a second: hand the edited document back, for the
@@ -559,23 +572,29 @@ impl Editor for DreistEditor {
             }
             if inbox.mods_triggered != 0 {
                 ed.modulators_triggered(std::mem::take(&mut inbox.mods_triggered));
+                trace.check(ed, "modulators_triggered");
             }
-            if let Some(st) = inbox.seq_steps.take().filter(|st| *st != ed.model.seq_steps) {
-                ed.model.seq_steps = st;
-                ed.app.dirty = true;
+            if let Some(st) = inbox.seq_steps.take() {
+                ed.set_seq_steps(st);
+                trace.check(ed, "set_seq_steps");
             }
             ed.set_host_loop(inbox.host_loop);
+            trace.check(ed, "set_host_loop");
             if inbox.tempo > 0.0 {
                 ed.engine_tempo(inbox.tempo);
+                trace.check(ed, "engine_tempo");
             }
             if !inbox.automation.is_empty() {
                 ed.automation(&inbox.automation);
+                trace.check(ed, "automation");
             }
             if !inbox.editor_messages.is_empty() {
                 ed.binding_messages(&inbox.editor_messages);
+                trace.check(ed, "binding_messages");
             }
             if let Some(f) = lock(&bridge.load_progress).take() {
                 ed.load_progress(f);
+                trace.check(ed, "load_progress");
             }
             ed.model.memory = Some(bridge.sample_bytes.load(Ordering::Acquire));
             let sr = f32::from_bits(bridge.sample_rate.load(Ordering::Relaxed));
@@ -583,45 +602,67 @@ impl Editor for DreistEditor {
                 // The effect plots follow the rate.
                 ed.model.sample_rate = Some(sr);
                 ed.sync();
+                trace.check(ed, "sync");
             }
             ed.set_playback(inbox.playing, inbox.steps, inbox.song_pos);
+            trace.check(ed, "set_playback");
             // The preview volume is editor-side.
             if let Some(view) = inbox.sampler.take() {
                 let sampler = einst_editor::model::SamplerView { preview_volume: ed.model.sampler.preview_volume, ..view };
-                if ed.model.sampler != sampler {
-                    ed.model.sampler = sampler;
+                // The input meters change with every block (the default
+                // source is the master): `update_meters` repaints just the
+                // sampler's meters, anything else redraws the window.
+                let others = einst_editor::model::SamplerView { meters: ed.model.sampler.meters, ..sampler.clone() };
+                let changed = ed.model.sampler != others;
+                ed.model.sampler = sampler;
+                if changed {
                     ed.app.dirty = true;
+                    trace.check(ed, "dirty set in link");
                 }
             }
             ed.update_meters(&inbox.meters);
+            trace.check(ed, "update_meters");
+            perf.tick(ed, &bridge);
             let (n, ch, cc) = inbox.last_cc;
             ed.midi_cc(n, ch, cc);
+            trace.check(ed, "midi_cc");
             if !inbox.midi_log.is_empty() {
                 ed.midi_in(&inbox.midi_log);
+                trace.check(ed, "midi_in");
             }
             if inbox.live_reset || !inbox.live.is_empty() {
                 ed.sampler_live(inbox.live_reset, &inbox.live);
+                trace.check(ed, "sampler_live");
             }
             if !inbox.scene_events.is_empty() {
                 ed.scene_events(&inbox.scene_events);
+                trace.check(ed, "scene_events");
             } else {
                 ed.animate();
+                trace.check(ed, "animate");
             }
             if !inbox.retro_events.is_empty() {
                 ed.retro_events(&inbox.retro_events);
+                trace.check(ed, "retro_events");
             }
             if !inbox.step_writes.is_empty() {
                 ed.step_writes(&inbox.step_writes);
+                trace.check(ed, "step_writes");
             }
             if !inbox.song_events.is_empty() {
                 ed.song_events(&inbox.song_events);
+                trace.check(ed, "song_events");
             }
             for (t, sr) in inbox.takes.drain(..) {
                 ed.sampler_take(&t.left, &t.right, sr);
+                trace.check(ed, "sampler_take");
             }
+            trace.check(ed, "link");
+            trace.report();
             inbox.clear();
         });
-        Box::new(Handle(einst_editor::window::open_parented(&parent, gui, link)))
+        let scale = f32::from_bits(self.host_scale.load(std::sync::atomic::Ordering::Relaxed)) as f64;
+        Box::new(Handle(einst_editor::window::open_parented(&parent, gui, link, scale)))
     }
 
     fn size(&self) -> (u32, u32) {
@@ -634,9 +675,12 @@ impl Editor for DreistEditor {
         startup_size()
     }
 
-    fn set_scale_factor(&self, _factor: f32) -> bool {
-        // baseview follows the system scale factor itself.
-        false
+    fn set_scale_factor(&self, factor: f32) -> bool {
+        // Windows and Linux (macOS scales by itself and never calls this):
+        // the host sizes its view from `size()` times this factor, so the
+        // window takes it too.
+        self.host_scale.store(factor.to_bits(), std::sync::atomic::Ordering::Relaxed);
+        true
     }
 
     fn param_value_changed(&self, _id: &str, _normalized_value: f32) {}
@@ -644,6 +688,91 @@ impl Editor for DreistEditor {
     fn param_modulation_changed(&self, _id: &str, _modulation_offset: f32) {}
 
     fn param_values_changed(&self) {}
+}
+
+/// The CPU and memory readout's feed: once a second, while it is on.
+struct PerfFeed {
+    at: std::time::Instant,
+    /// The audio load's second last shown, and how many updates ago it
+    /// changed (the audio thread stopped: no DSP figures).
+    second: u32,
+    stale: u8,
+}
+
+impl Default for PerfFeed {
+    fn default() -> PerfFeed {
+        PerfFeed { at: std::time::Instant::now(), second: 0, stale: 0 }
+    }
+}
+
+impl PerfFeed {
+    fn tick(&mut self, ed: &mut DreistGui, bridge: &Bridge) {
+        ed.place_perf();
+        if let (Some(m), Some(ui)) = (dreist_engine::diag::monitor(), ed.app.ui_load) {
+            m.set_ui_load(ui);
+        }
+        if self.at.elapsed() < std::time::Duration::from_secs(1) {
+            return;
+        }
+        self.at = std::time::Instant::now();
+        if !ed.perf_shown() {
+            ed.performance(&dreist_gui::perf::Reading::default());
+            return;
+        }
+        let second = bridge.load.seconds();
+        self.stale = if second == self.second { self.stale.saturating_add(1) } else { 0 };
+        self.second = second;
+        let dsp = bridge.load.reading().filter(|_| self.stale < 2);
+        let r = dreist_gui::perf::Reading {
+            dsp: dsp.map(|d| d.average),
+            peak: dsp.map(|d| d.peak),
+            ui: ed.app.ui_load,
+            memory: dreist_engine::load::rss_bytes(),
+            late: bridge.standalone.load(Ordering::Relaxed).then(|| bridge.load.reading().map_or(0, |d| d.late)),
+        };
+        ed.performance(&r);
+    }
+}
+
+/// `DREIST_GUI_STATS=1`: which of the link's inputs made the whole window
+/// redraw, counted per second (next to the window's frame counts).
+struct DirtyTrace {
+    on: bool,
+    was: bool,
+    since: std::time::Instant,
+    counts: Vec<(&'static str, u32)>,
+}
+
+impl DirtyTrace {
+    fn new() -> DirtyTrace {
+        DirtyTrace { on: std::env::var_os("DREIST_GUI_STATS").is_some(), was: false, since: std::time::Instant::now(), counts: Vec::new() }
+    }
+
+    fn begin(&mut self, ed: &DreistGui) {
+        self.was = ed.app.dirty;
+    }
+
+    fn check(&mut self, ed: &DreistGui, what: &'static str) {
+        if self.on && !self.was && ed.app.dirty {
+            match self.counts.iter_mut().find(|(w, _)| *w == what) {
+                Some((_, n)) => *n += 1,
+                None => self.counts.push((what, 1)),
+            }
+        }
+        self.was = ed.app.dirty;
+    }
+
+    fn report(&mut self) {
+        if !self.on || self.since.elapsed().as_secs_f64() < 1.0 {
+            return;
+        }
+        if !self.counts.is_empty() {
+            let list: Vec<String> = self.counts.iter().map(|(w, n)| format!("{w} x{n}")).collect();
+            eprintln!("gui: whole-window redraws from {}", list.join(", "));
+            self.counts.clear();
+        }
+        self.since = std::time::Instant::now();
+    }
 }
 
 #[cfg(test)]
