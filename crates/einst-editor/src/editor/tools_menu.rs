@@ -15,6 +15,7 @@ pub(crate) enum MainAction {
     FindMissing,
     Export,
     MidiConsole,
+    Performance,
     TransportOptions,
     ResetScale,
     /// Reset, confirmed.
@@ -22,7 +23,37 @@ pub(crate) enum MainAction {
     None,
 }
 
+/// Options key: the CPU and memory readout is on (off by default).
+pub(crate) const PERF_OPTION: &str = "ShowPerformance";
+
 impl Editor {
+    /// The CPU and memory readout is on.
+    pub fn perf_shown(&self) -> bool {
+        self.modals.options.bool(PERF_OPTION, false)
+    }
+
+    /// Show `r` in the readout, adding or removing it to match the option
+    /// (the app calls this about once a second).
+    pub fn performance(&mut self, r: &dreist_gui::perf::Reading) {
+        self.place_perf();
+        if self.perf_shown() {
+            dreist_gui::perf::update(&mut self.app, r);
+        }
+    }
+
+    /// Add or remove the readout to match the option, in a strip taken
+    /// from the bottom of the browser's list area (kept every frame through
+    /// splitters and window sizes); hidden while that area is not shown.
+    pub fn place_perf(&mut self) {
+        let on = self.perf_shown();
+        let list = self.browser.as_ref().map(|b| b.page().to_vec()).and_then(|page| Some([&page[..], &self.app.ctrl(&page)?.path_of("SplitView")?[..]].concat()));
+        let strip = list.and_then(|p| dreist_gui::perf::reserve_below(&mut self.app, &p, on));
+        dreist_gui::perf::show(&mut self.app, on);
+        if on {
+            dreist_gui::perf::place(&mut self.app, strip.unwrap_or_default());
+        }
+    }
+
     fn main_items(&self) -> Vec<(String, MainAction)> {
         use MainAction::*;
         // v1's Grid menu ([re:3695e4]): About, Preferences, Reset, the
@@ -42,6 +73,7 @@ impl Editor {
             ("Find missing files...".into(), FindMissing),
             ("Export as audio...".into(), Export),
             ("Show MIDI console".into(), MidiConsole),
+            (if self.perf_shown() { "Hide CPU and memory" } else { "Show CPU and memory" }.into(), Performance),
             ("Reset UI scale to 100%".into(), ResetScale),
         ]
     }
@@ -128,6 +160,15 @@ impl Editor {
                     }
                     // Lambda #8: scale 1 (when not already);
                     // LastEditorScaleFactor 100.
+                    MainAction::Performance => {
+                        let on = !self.perf_shown();
+                        self.modals.options.set(PERF_OPTION, on);
+                        if !cfg!(test) {
+                            self.modals.options.save();
+                        }
+                        self.place_perf();
+                        return false;
+                    }
                     MainAction::ResetScale => {
                         if (self.app.ui_scale - 1.0).abs() > 1e-6 {
                             self.modals.options.set("LastEditorScaleFactor", 100);
