@@ -320,11 +320,15 @@ impl Plugin for EinstPlugin {
                 Dreist::empty(sr, options)
             }),
             // [re:5cbd54] (from the constructor):
-            // Tools › Save as default preset, when one was saved.
-            (None, None) => einst_editor::options::settings_dir()
-                .map(|d| d.join("DefaultPreset.geist"))
+            // Tools › Save as default preset, when one was saved (the
+            // editor's file, its samples beside it as for Reset).
+            (None, None) => einst_editor::options::default_preset()
                 .filter(|p| p.is_file())
-                .and_then(|p| Dreist::load_cached(&p, sr, options, &mut cache).ok())
+                .and_then(|p| {
+                    let g = load_project(&p, sr, options, &mut cache).ok()?;
+                    samples = Some(dreist_formats::model::samples_dir(&p));
+                    Some(g)
+                })
                 .unwrap_or_else(|| Dreist::empty(sr, options)),
         };
         drop(cache);

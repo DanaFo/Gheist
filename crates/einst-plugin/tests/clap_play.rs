@@ -200,3 +200,37 @@ fn host_transport_plays_the_project_and_notes_sound() {
 fn inactive_sub_outputs_do_not_silence_the_main_output() {
     plays(true);
 }
+
+/// Repro: a default preset saved with Tools › Save as default preset (the
+/// editor's `options::default_preset()` path) is what a new instance with
+/// no host session and no project starts with.
+#[test]
+fn new_instance_starts_from_the_saved_default_preset() {
+    if std::env::var_os("EINST_TEST_PROJECT").is_some() {
+        eprintln!("EINST_TEST_PROJECT set: skipped");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("einst-default-preset-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let kit_samples = dir.join("Kit.samples");
+    std::fs::create_dir_all(&kit_samples).unwrap();
+    let click = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/ui-v1/Metronomes/Default/Beat.wav");
+    std::fs::copy(&click, kit_samples.join("Beat.wav")).unwrap();
+    let kit = dir.join("Kit.geistkit");
+    std::fs::write(&kit, r#"<root><Pad name="Pad0" Ver="2" PadMode="All layers"><Layer name="Layer0" Ver="3.2" AudioFileName="Beat.wav" Envelope0Param3="-1" /></Pad></root>"#).unwrap();
+    // SAFETY: set before the plugin's threads start; the other tests in
+    // this binary skip without EINST_TEST_PROJECT.
+    unsafe { std::env::set_var("EINST_SETTINGS_DIR", dir.join("settings")) };
+    // What Tools › Save as default preset writes (with Einst's profile, as
+    // in the plugin).
+    einst::install();
+    let g = einst_plugin::load_project(&kit, SR as f32, Default::default(), &mut Default::default()).unwrap();
+    let preset = einst_editor::options::default_preset().unwrap();
+    std::fs::create_dir_all(preset.parent().unwrap()).unwrap();
+    einst_editor::project::save(g.document(), Some(&kit_samples), &preset, false).unwrap();
+    let inst = Instance::new(false);
+    let noted = inst.run(1.0, false, |b| if b == 4 { vec![midi([0x90, 36, 110])] } else { Vec::new() });
+    drop(inst);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(noted > 1e-3, "pad 1 of the default preset is silent (peak {noted}): {} was not loaded", preset.file_name().unwrap().to_string_lossy());
+}
