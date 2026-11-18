@@ -19,7 +19,7 @@
 //! Swing shortens one side's output tap.
 
 use crate::fast_exp2;
-use crate::math::{cubic, pow2_at_least, sat};
+use crate::math::{cubic_back, pow2_at_least, sat};
 use dreist_dsp::fx::convert::{bpm_from_text, time_beat_to_units};
 use dreist_dsp::fx::{Ctx, Node, Port, ports, ports_from};
 
@@ -184,19 +184,18 @@ impl Node for Delay {
                 }
                 self.idx = self.idx.wrapping_add(1) & mask;
                 let idx = self.idx;
-                let pos = idx as i32 as f32;
                 let x = [inp[0][i], inp[1][i]];
                 if mono {
-                    let tap = clip(cubic(&self.buf[0], mask, pos - d), -2.0, 2.0);
+                    let tap = clip(cubic_back(&self.buf[0], mask, idx, d), -2.0, 2.0);
                     let lp = ((fb * sat(tap) + (x[0] + x[1]) * 0.5) - self.lp[0]) * k_lp + self.lp[0];
                     self.lp[0] = lp;
                     let hp = lp - self.hs[0];
                     self.hs[0] += k_hp * hp;
                     self.buf[0][(idx & mask) as usize] = hp * e_hp;
-                    ol[i] = cubic(&self.buf[0], mask, pos - self.swing[0] * d) * self.wet + x[0] * self.dry;
-                    or[i] = cubic(&self.buf[0], mask, pos - self.swing[1] * d) * self.wet + x[1] * self.dry;
+                    ol[i] = cubic_back(&self.buf[0], mask, idx, self.swing[0] * d) * self.wet + x[0] * self.dry;
+                    or[i] = cubic_back(&self.buf[0], mask, idx, self.swing[1] * d) * self.wet + x[1] * self.dry;
                 } else {
-                    let taps = [cubic(&self.buf[0], mask, pos - d), cubic(&self.buf[1], mask, pos - d)];
+                    let taps = [cubic_back(&self.buf[0], mask, idx, d), cubic_back(&self.buf[1], mask, idx, d)];
                     for c in 0..2 {
                         let tap = clip(taps[c], -2.0, 2.0);
                         let lp = ((sat(tap) * fb + x[c]) - self.lp[c]) * k_lp + self.lp[c];
@@ -205,8 +204,8 @@ impl Node for Delay {
                         self.hs[c] += k_hp * hp;
                         self.buf[c][(idx & mask) as usize] = hp * e_hp;
                     }
-                    ol[i] = cubic(&self.buf[0], mask, pos - self.swing[0] * d) * self.wet + x[0] * self.dry;
-                    or[i] = cubic(&self.buf[1], mask, pos - self.swing[1] * d) * self.wet + x[1] * self.dry;
+                    ol[i] = cubic_back(&self.buf[0], mask, idx, self.swing[0] * d) * self.wet + x[0] * self.dry;
+                    or[i] = cubic_back(&self.buf[1], mask, idx, self.swing[1] * d) * self.wet + x[1] * self.dry;
                 }
             }
         } else {

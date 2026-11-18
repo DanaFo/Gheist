@@ -554,3 +554,47 @@ fn ring_mod_sine_matches_dreist_but_for_start_phase() {
     assert!((crossings(a) - crossings(b)).abs() <= 1);
     assert_ne!(a, b);
 }
+
+/// Repro: a delay-time glide repitches a sine smoothly however long the
+/// delay has been running. The read position `pos - d` is f32 on a 2^22
+/// ring: past 2^21 samples it moves in quarter-sample steps.
+#[test]
+fn delay_glide_stays_smooth_late_in_the_ring() {
+    let ctx = Ctx::new(48_000.0);
+    // 0 time (2^(p−1) s), 1 mode, 2 feedback, 3 swing, 4 mono, 5 low cut, 6 high cut, 7 mix (wet only).
+    let time = |s: f32| s.log2() + 1.0;
+    let roughness = |skip: usize| {
+        let mut d = einst_dsp::delay::Delay::new();
+        for (i, v) in [(0, time(0.25)), (1, 0.0), (2, 0.0), (3, 0.0), (4, 0.0), (5, 0.0), (6, 13.0), (7, 1.0)] {
+            d.ports()[i].value = v;
+        }
+        let z = vec![0.0f32; 512];
+        let mut t = 0usize;
+        let mut sine = |n: usize| -> Vec<f32> {
+            let v = (0..n).map(|k| (2.0 * std::f64::consts::PI * 1000.0 * (t + k) as f64 / 48_000.0).sin() as f32 * 0.5).collect();
+            t += n;
+            v
+        };
+        // Silence to move the write index on, then 1 s of sine at 0.25 s.
+        for _ in 0..skip / 512 {
+            d.process(&ctx, [&z, &z], [&mut vec![0.0; 512], &mut vec![0.0; 512]]);
+        }
+        for _ in 0..48_000 / 512 {
+            let x = sine(512);
+            d.process(&ctx, [&x, &x], [&mut vec![0.0; 512], &mut vec![0.0; 512]]);
+        }
+        // Glide to 0.2625 s; the largest second difference while it runs.
+        d.ports()[0].value = time(0.2625);
+        let mut out = Vec::new();
+        for _ in 0..8 {
+            let x = sine(512);
+            let (mut l, mut r) = (vec![0.0; 512], vec![0.0; 512]);
+            d.process(&ctx, [&x, &x], [&mut l, &mut r]);
+            out.extend(l);
+        }
+        out.windows(3).map(|w| (w[0] - 2.0 * w[1] + w[2]).abs()).fold(0.0f32, f32::max)
+    };
+    let early = roughness(0);
+    let late = roughness(1 << 21);
+    assert!(late < early * 1.5, "glide roughness {late} late in the ring vs {early} early");
+}

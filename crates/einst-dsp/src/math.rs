@@ -22,6 +22,19 @@ pub(crate) fn sat(x: f32) -> f32 {
 pub(crate) fn cubic(buf: &[f32], mask: u32, pos: f32) -> f32 {
     let i = pos.floor() as i32 as u32;
     let t = pos - (i as i32) as f32;
+    cubic_at(buf, mask, i, t)
+}
+
+/// [`cubic`] at `back` samples before ring index `idx`. The fraction comes
+/// from `back` alone: `idx as f32 - back` loses it once `idx` is large
+/// (quarter-sample steps past 2^21).
+pub(crate) fn cubic_back(buf: &[f32], mask: u32, idx: u32, back: f32) -> f32 {
+    let k = back.ceil();
+    cubic_at(buf, mask, idx.wrapping_sub(k as i32 as u32), k - back)
+}
+
+/// The cubic between ring samples `i` and `i + 1`, `t` of the way.
+fn cubic_at(buf: &[f32], mask: u32, i: u32, t: f32) -> f32 {
     let a = buf[(i.wrapping_sub(1) & mask) as usize];
     let b = buf[(i & mask) as usize];
     let c = buf[(i.wrapping_add(1) & mask) as usize];
