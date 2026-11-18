@@ -109,6 +109,12 @@ pub struct LiveTake {
 }
 
 impl LiveTake {
+    /// Whether `take` starts a new take (the display restarts): none was
+    /// being shown, or it is shorter than what was.
+    pub fn starts_new(&self, take: Option<(&[f32], &[f32])>) -> bool {
+        take.is_some_and(|(l, _)| !self.active || l.len() < self.frames)
+    }
+
     /// Append pairs for the frames recorded since the last call, within
     /// `out`'s reserved room (the audio thread calls this; the rest follows
     /// once the editor drained it); returns whether a new take started
@@ -118,7 +124,7 @@ impl LiveTake {
             self.active = false;
             return false;
         };
-        let reset = !self.active || l.len() < self.frames;
+        let reset = self.starts_new(Some((l, r)));
         if reset {
             self.frames = 0;
             self.active = true;

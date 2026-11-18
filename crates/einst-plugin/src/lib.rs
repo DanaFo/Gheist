@@ -33,6 +33,17 @@ pub fn load_project(p: &std::path::Path, sr: f32, options: dreist_engine::Render
     }
 }
 
+/// The live take display's share of a block: on a new take the previous
+/// take's buckets go (the editor restarts) before the new take's first ones
+/// are added.
+fn live_step(live_take: &mut einst_editor::model::LiveTake, take: Option<(&[f32], &[f32])>, live: &mut Vec<(f32, f32)>, reset: &mut bool) {
+    if live_take.starts_new(take) {
+        live.clear();
+        *reset = true;
+    }
+    live_take.poll(take, live);
+}
+
 /// Stereo sub outputs exposed to the host ("Sub output 1..16").
 pub const SUB_PORTS: usize = 16;
 /// Host automation parameters routed to [re:0ad0c9] host bindings.
@@ -496,10 +507,8 @@ impl Plugin for EinstPlugin {
             hand_over(&mut s.step_writes, &mut engine.step_writes);
             hand_over(&mut s.song_events, &mut engine.songrec.events);
             let take = engine.sampler.current_take().map(|t| (t.left.as_slice(), t.right.as_slice()));
-            if self.live_take.poll(take, &mut s.live) {
-                s.live.clear();
-                s.live_reset = true;
-            }
+            let st = &mut *s;
+            live_step(&mut self.live_take, take, &mut st.live, &mut st.live_reset);
             s.meters.merge(&engine.meters);
             engine.meters.clear();
         }
@@ -622,6 +631,23 @@ mod tests {
         let peak = l.iter().chain(&r).fold(0.0f32, |m, v| m.max(v.abs()));
         let _ = std::fs::remove_dir_all(&dir);
         assert!(peak > 1e-3, "pad 0 silent");
+    }
+
+    /// Repro: the block a new take starts in hands the editor that take's
+    /// first buckets. Through `process`'s live-take step.
+    #[test]
+    fn new_take_keeps_its_first_buckets() {
+        use einst_editor::model::{LIVE_BUCKET, LiveTake};
+        let mut live_take = LiveTake::default();
+        let mut live: Vec<(f32, f32)> = Vec::with_capacity(64);
+        let take = vec![0.5f32; 512];
+        let mut reset = false;
+        // A stale bucket from the previous take, then the new take's block.
+        live.push((1.0, -1.0));
+        live_step(&mut live_take, Some((&take, &take)), &mut live, &mut reset);
+        assert!(reset, "the display restarts");
+        assert!(live.iter().all(|b| *b == (0.0, 0.5)), "only the new take's buckets: {live:?}");
+        assert_eq!(live.len(), 512 / LIVE_BUCKET, "the first 512 frames of the take never reach the display");
     }
 
     #[test]
