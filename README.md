@@ -92,7 +92,7 @@ xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Einst.vst3 ~/Librar
 ### Limitations
 
 - **REX files** (`.rx2`, `.rex`) load on macOS only.
-- **Dragging samples** out of Einst into a host or file manager works on macOS only.
+- **Dragging samples** out of Einst into a host or file manager works on macOS and Windows.
 - **Wayland** desktops run Einst through XWayland.
 
 ## Content

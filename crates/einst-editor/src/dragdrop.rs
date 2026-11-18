@@ -300,7 +300,7 @@ impl Editor {
     /// A drag left the window ([re:be4a8a] →
     /// [re:be7228]): a pattern key becomes
     /// `<temp>/<pattern name>.mid` ('/', '\\', ':' → '_';
-    /// [re:c995b5]), browser files go
+    /// [re:c995b5]; also what Windows refuses), browser files go
     /// as they are ([re:92d0d8] 0x4210); pads
     /// export nothing.
     pub(crate) fn drag_out(&mut self, ev: &UiEvent) -> bool {
@@ -310,7 +310,8 @@ impl Editor {
                 let e = self.model.engine;
                 let name = self.model.pattern_name(e, n);
                 let name = if name.is_empty() { format!("Pattern {}", n + 1) } else { name };
-                let name: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':') { '_' } else { c }).collect();
+                // v1's three, and the rest Windows refuses in a file name.
+                let name: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '_' } else { c }).collect();
                 let path = std::env::temp_dir().join(format!("{name}.mid"));
                 if !self.save_pattern_midi_of(&path, n) {
                     return false;
