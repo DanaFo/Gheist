@@ -7,6 +7,7 @@
 //! unchanged; what differs is the vocabulary (class and attribute names,
 //! per-object `Ver` floats instead of `version` ints) and the semantics.
 
+pub mod adg;
 pub mod bindings;
 pub mod chunk;
 pub mod kind;

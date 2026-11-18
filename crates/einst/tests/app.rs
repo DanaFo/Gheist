@@ -84,6 +84,21 @@ fn editor_part_loads_take_v1_files() {
     assert!(einst_editor::browser::load_kit_into_doc(&mut model, &kit));
     let e = model.doc.child("Engine", &format!("Engine{}", model.engine)).unwrap();
     assert!(e.child("Pad", "Pad5").and_then(|p| p.children_of("Layer").next()).is_some_and(|l| l.version == Some(3300)));
+    // A drum rack preset (here not gzipped) loads as a kit and opens as a project.
+    std::fs::write(dir.join("Beat.wav"), b"RIFF").unwrap();
+    let rack = dir.join("Rack.adg");
+    std::fs::write(
+        &rack,
+        r#"<Ableton><GroupDevicePreset><BranchPresets><DrumBranchPreset><DevicePresets><DrumCell><UserSample><Value><SampleRef><FileRef><RelativePath Value="Beat.wav" /></FileRef></SampleRef></Value></UserSample></DrumCell></DevicePresets><ZoneSettings><ReceivingNote Value="90" /></ZoneSettings></DrumBranchPreset></BranchPresets></GroupDevicePreset></Ableton>"#,
+    )
+    .unwrap();
+    assert!(einst_editor::browser::load_kit_into_doc(&mut model, &rack));
+    let e = model.doc.child("Engine", &format!("Engine{}", model.engine)).unwrap();
+    assert!(e.child("Pad", "Pad5").is_none(), "the kit's pads replace the engine's");
+    let layer = e.child("Pad", "Pad2").and_then(|p| p.children_of("Layer").next()).expect("note 38 → pad 3");
+    assert_eq!(std::path::Path::new(layer.attr("AudioFileName").unwrap()), dir.join("Beat.wav"));
+    let (proj, converted) = einst_editor::app::read_project(&rack).unwrap();
+    assert!(converted && proj.child("Engine", "Engine0").and_then(|e| e.child("Pad", "Pad2")).is_some());
     let _ = std::fs::remove_dir_all(&dir);
 }
 

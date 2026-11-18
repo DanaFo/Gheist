@@ -117,7 +117,7 @@ pub fn native_dialogs() -> crate::DialogFn {
             let (kind, desc, noun) = part.doc_kind();
             let mut d = rfd::FileDialog::new().set_title(format!("Please choose the {noun} file to load")).add_filter(desc, &dreist_formats::profile::extensions_of(kind));
             d = match part {
-                crate::project::Part::Kit(_) => d.add_filter("Guru kit files", &["KIT", "kit"]),
+                crate::project::Part::Kit(_) => d.add_filter("Drum rack presets", &[einst_formats::adg::EXTENSION]).add_filter("Guru kit files", &["KIT", "kit"]),
                 crate::project::Part::Pattern(..) => d.add_filter("Guru pattern files", &["G01", "g01"]),
                 crate::project::Part::Bank(_) => d.add_filter("Guru pattern bank files", &["G24", "g24"]),
                 _ => d,

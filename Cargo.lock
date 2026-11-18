@@ -906,6 +906,7 @@ dependencies = [
  "dreist-dsp",
  "dreist-engine",
  "dreist-formats",
+ "flate2",
 ]
 
 [[package]]

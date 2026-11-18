@@ -7,6 +7,8 @@ description = "Readers for v1 (1.1.1.2) files, mapped onto the v2 document model
 
 [dependencies]
 dreist-formats.workspace = true
+# Drum rack presets of another DAW are gzipped XML (`adg`).
+flate2 = "1.1"
 
 [dev-dependencies]
 dreist-engine.workspace = true

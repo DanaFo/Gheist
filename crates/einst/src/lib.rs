@@ -32,7 +32,8 @@ pub static PROFILE: Profile = Profile {
 /// The extensions Einst's Open dialog offers besides projects: v1 parts
 /// open as projects (into engine 0).
 /// A host's program, bank and preset files with v1's plugin state open as
-/// projects too (`einst_formats::chunk`).
+/// projects too (`einst_formats::chunk`), and drum rack presets as kits
+/// (`einst_formats::adg`).
 pub const OPEN_ALSO: &[&str] = &[
     dreist_formats::profile::LEGACY.kit,
     dreist_formats::profile::LEGACY.pad,
@@ -42,6 +43,7 @@ pub const OPEN_ALSO: &[&str] = &[
     einst_formats::chunk::EXTENSIONS[0],
     einst_formats::chunk::EXTENSIONS[1],
     einst_formats::chunk::EXTENSIONS[2],
+    einst_formats::adg::EXTENSION,
 ];
 
 /// v1's effect menu: its 32 types in v1's order and categories.

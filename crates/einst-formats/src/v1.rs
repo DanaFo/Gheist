@@ -90,8 +90,12 @@ impl Document {
 /// (`<file>.samples`, as both versions do).
 ///
 /// A host's program, bank or preset file holding v1's plugin state opens
-/// as that project ([`crate::chunk`]).
+/// as that project ([`crate::chunk`]), a drum rack preset as its kit
+/// ([`crate::adg`]).
 pub fn open_as_project(path: &Path) -> Result<Option<(Node, std::path::PathBuf)>, Error> {
+    if crate::adg::is_drum_rack(path) {
+        return Ok(Some((as_project(FileKind::Kit, crate::adg::convert(path)?), dreist_formats::model::samples_dir(path))));
+    }
     if crate::chunk::is_state_file(path) {
         return Ok(crate::chunk::convert(&std::fs::read(path)?)?.map(|doc| (doc, dreist_formats::model::samples_dir(path))));
     }
@@ -101,8 +105,12 @@ pub fn open_as_project(path: &Path) -> Result<Option<(Node, std::path::PathBuf)>
 
 /// A the original v1 project, kit, pad, engine, pattern or bank file converted to
 /// v2's tree as is (the same root shape: one `Pad`, `Engine` or
-/// [re:c0936b] for single-object files); `Ok(None)` for anything else.
+/// [re:c0936b] for single-object files), and a drum rack preset as its kit
+/// ([`crate::adg`]); `Ok(None)` for anything else.
 pub fn convert_file(path: &Path) -> Result<Option<Node>, Error> {
+    if crate::adg::is_drum_rack(path) {
+        return crate::adg::convert(path).map(Some);
+    }
     let Some(kind) = FileKind::from_path(path) else { return Ok(None) };
     if matches!(kind, FileKind::EffectPreset | FileKind::EffectChain | FileKind::PatternTemplate | FileKind::SwingTemplate) {
         return Ok(None);

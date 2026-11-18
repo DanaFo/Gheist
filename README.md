@@ -98,6 +98,7 @@ xattr -dr com.apple.quarantine ~/Library/Audio/Plug-Ins/VST3/Einst.vst3 ~/Librar
 ## Content
 
 - **Samples**: none included; Geist v1 and Geist2 kits, presets and expansions load as they are.
+- **Ableton drum racks**: `.adg` presets open as kits (sampled pads; samples from the library holding the preset).
 - **Bundled**: v1's factory effect presets, effect chains, and pattern and swing templates.
 - **Project samples**: found next to the project in `<project>.samples/`, as in v1.
 

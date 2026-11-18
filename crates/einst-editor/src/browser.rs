@@ -196,8 +196,9 @@ fn scroll_thumb(h: f32, n: usize, scroll: usize) -> (f32, f32) {
     (((h - th) * scroll.min(n - vis) as f32 / (n - vis) as f32).round(), th)
 }
 
-/// Listed files besides projects and kits of every family.
-const EXTENSIONS: [&str; 13] = ["wav", "aif", "aiff", "patterntemplate", "rx2", "rex", "rcy", "rex2", "rcso", "gru", "kit", "g01", "g24"];
+/// Listed files besides projects and kits of every family (drum rack
+/// presets load as kits, `einst_formats::adg`).
+const EXTENSIONS: [&str; 14] = ["wav", "aif", "aiff", "patterntemplate", "rx2", "rex", "rcy", "rex2", "rcso", "gru", "kit", "g01", "g24", einst_formats::adg::EXTENSION];
 
 /// Whether the browser lists a file with extension `e`.
 fn listed(e: &std::ffi::OsStr) -> bool {
@@ -1994,7 +1995,7 @@ impl Browser {
         let kind = dreist_formats::profile::doc_kind(&ext);
         match ext.as_str() {
             _ if kind == Some(dreist_formats::profile::DocKind::Project) => out.push(Command::LoadProject(en.path)),
-            _ if kind == Some(dreist_formats::profile::DocKind::Kit) => {
+            _ if kind == Some(dreist_formats::profile::DocKind::Kit) || einst_formats::adg::is_drum_rack(&en.path) => {
                 if load_kit_into_doc(model, &en.path) {
                     out.push(model.rebuild_command());
                 }
