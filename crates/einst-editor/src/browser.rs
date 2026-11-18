@@ -739,6 +739,29 @@ fn subdirs(p: &Path) -> Vec<PathBuf> {
     v
 }
 
+/// The Drives category: the mounted volumes (macOS `/Volumes`), the drive
+/// roots `A:` to `Z:` (Windows), or the mounts under `/media/<user>`,
+/// `/run/media/<user>`, `/media` and `/mnt` (Linux).
+fn drives() -> Vec<(String, PathBuf)> {
+    let named = |dirs: Vec<PathBuf>| dirs.into_iter().filter_map(|p| Some((p.file_name()?.to_string_lossy().into_owned(), p))).collect();
+    if cfg!(windows) {
+        (b'A'..=b'Z').map(|c| (format!("{}:", c as char), PathBuf::from(format!("{}:\\", c as char)))).filter(|(_, p)| p.is_dir()).collect()
+    } else if cfg!(target_os = "macos") {
+        named(subdirs(Path::new("/Volumes")))
+    } else {
+        let user = std::env::var("USER").unwrap_or_default();
+        let mut v: Vec<PathBuf> = Vec::new();
+        for root in [format!("/media/{user}"), format!("/run/media/{user}"), "/media".into(), "/mnt".into()] {
+            for d in subdirs(Path::new(&root)) {
+                if !v.contains(&d) && d != Path::new("/media").join(&user) {
+                    v.push(d);
+                }
+            }
+        }
+        named(v)
+    }
+}
+
 fn hidden(p: &Path) -> bool {
     p.file_name().map(|n| n.to_string_lossy().starts_with('.')).unwrap_or(true)
 }
@@ -766,7 +789,7 @@ fn sources_with(favourites: &[PathBuf], searches: &[String], shortlists: &[(Stri
                 dirs.into_iter().map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), p)).collect()
             }
             "Places" => ["", "Desktop", "Documents", "Music"].iter().map(|d| (if d.is_empty() { "Home".to_string() } else { d.to_string() }, home.join(d))).filter(|(_, p)| p.is_dir()).collect(),
-            "Drives" => subdirs(Path::new("/Volumes")).into_iter().map(|p| (p.file_name().unwrap().to_string_lossy().into_owned(), p)).collect(),
+            "Drives" => drives(),
             "Favourites" => favourites.iter().map(|p| (p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(), p.clone())).collect(),
             // Searches carry the terms in a pseudo path.
             // (saved ones "cache:<file>").
@@ -2918,6 +2941,16 @@ mod search_tests {
         std::fs::write(&f, vec![0u8; 3000]).unwrap();
         assert_eq!(size_label(&f, false), "2.93KB");
         let _ = std::fs::remove_file(&f);
+    }
+
+    /// Repro: the Drives category listed macOS's `/Volumes` only, so it
+    /// stayed empty elsewhere.
+    #[cfg(windows)]
+    #[test]
+    fn drives_list_the_windows_drive_roots() {
+        let system = std::env::var("SystemDrive").unwrap_or_else(|_| "C:".into());
+        let d = drives();
+        assert!(d.iter().any(|(n, p)| *n == system && p.as_os_str() == format!("{system}\\").as_str()), "{d:?}");
     }
 
     #[test]
