@@ -3165,6 +3165,18 @@ pub fn randomised(v: f32, amount: f32, r: f32) -> f32 {
     (if d <= 0.0 { v - x } else { v + x }).clamp(0.0, 1.0)
 }
 
+impl PatternPanel {
+    /// The app closed a menu without a pick (Escape, a click elsewhere):
+    /// forget what was kept for it, so the next pick in another menu is
+    /// not taken for one here.
+    pub(crate) fn menu_dismissed(&mut self) {
+        self.swing_menu = None;
+        self.swing_knob_menu = false;
+        self.toolbar_menu = None;
+        self.graph_menu = None;
+    }
+}
+
 #[cfg(test)]
 mod graph_tests {
     #[test]

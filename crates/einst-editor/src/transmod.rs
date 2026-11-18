@@ -885,6 +885,16 @@ fn draw_seq(model: &Model, r: &dreist_gui::render::Renderer, p: &mut dreist_gui:
     }
 }
 
+impl Transmod {
+    /// The app closed a menu without a pick (Escape, a click elsewhere):
+    /// forget what was kept for it, so the next pick in another menu is
+    /// not taken for one here.
+    pub(crate) fn menu_dismissed(&mut self) {
+        self.menu = None;
+        self.popup = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

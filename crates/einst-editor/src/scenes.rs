@@ -591,6 +591,15 @@ fn draw_view(r: &dreist_gui::render::Renderer, p: &mut dreist_gui::paint::Painte
     p.stroke_rect(rr, s.colour(st, "colBorder", Colour::rgba(18, 25, 60, 255)), 1.0);
 }
 
+impl Scenes {
+    /// The app closed a menu without a pick (Escape, a click elsewhere):
+    /// forget what was kept for it, so the next pick in another menu is
+    /// not taken for one here.
+    pub(crate) fn menu_dismissed(&mut self) {
+        self.menu = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

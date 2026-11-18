@@ -881,6 +881,15 @@ impl MidiMap {
     }
 }
 
+impl MidiMap {
+    /// The app closed a menu without a pick (Escape, a click elsewhere):
+    /// forget what was kept for it, so the next pick in another menu is
+    /// not taken for one here.
+    pub(crate) fn menu_dismissed(&mut self) {
+        self.row_menu = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

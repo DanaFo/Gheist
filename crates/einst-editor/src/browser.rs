@@ -2819,6 +2819,17 @@ fn is_preset(p: &Path) -> bool {
     p.extension().map(|e| e.to_string_lossy().to_lowercase()).and_then(|e| dreist_formats::profile::doc_kind(&e)) == Some(dreist_formats::profile::DocKind::Project)
 }
 
+impl Browser {
+    /// The app closed a menu without a pick (Escape, a click elsewhere):
+    /// forget what was kept for it, so the next pick in another menu is
+    /// not taken for one here.
+    pub(crate) fn menu_dismissed(&mut self) {
+        self.view_menu = 0;
+        self.header_menu = 0;
+        self.short_menu.clear();
+    }
+}
+
 #[cfg(test)]
 mod search_tests {
     use super::*;

@@ -1916,6 +1916,15 @@ fn wheel_thumb(view: (f32, f32), dy: f32, track_w: f32) -> (f32, f32) {
     crate::zoomslider::clamp((view.0 + px / track_w.max(1.0), view.1))
 }
 
+impl Inspector {
+    /// The app closed a menu without a pick (Escape, a click elsewhere):
+    /// forget what was kept for it, so the next pick in another menu is
+    /// not taken for one here.
+    pub(crate) fn menu_dismissed(&mut self) {
+        self.menu = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

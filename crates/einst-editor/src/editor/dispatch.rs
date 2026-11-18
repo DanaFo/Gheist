@@ -453,7 +453,38 @@ impl Editor {
         self.app.invalidate_changes_with(before, Some(&d));
     }
 
+    /// What every panel kept for an open menu, forgotten (see `handle`).
+    fn menus_dismissed(&mut self) {
+        self.history_menu = None;
+        self.file_menu = None;
+        self.main_menu = false;
+        self.reset_confirm = false;
+        self.inspector.menu_dismissed();
+        self.transmod.menu_dismissed();
+        self.mixers.iter_mut().for_each(mixer::Mixer::menu_dismissed);
+        if let Some(p) = self.pattern.as_mut() {
+            p.menu_dismissed();
+        }
+        if let Some(s) = self.scenes.as_mut() {
+            s.menu_dismissed();
+        }
+        if let Some(s) = self.song.as_mut() {
+            s.menu_dismissed();
+        }
+        if let Some(b) = self.browser.as_mut() {
+            b.menu_dismissed();
+        }
+        if let Some(m) = self.midimap.as_mut() {
+            m.menu_dismissed();
+        }
+    }
+
     pub fn handle(&mut self, ev: &UiEvent) {
+        // A menu closed without a pick sends no event: before anything else
+        // with no menu open, the state kept for it goes.
+        if self.app.menu.is_none() && !matches!(ev, UiEvent::MenuSelected { .. } | UiEvent::MenuSlider { .. }) {
+            self.menus_dismissed();
+        }
         if self.swing_import_event(ev) {
             self.app.dirty = true;
             return;

@@ -33,6 +33,15 @@ use crate::{EditorError, err};
 
 const TIMELINE_H: f32 = 20.0;
 /// Editor tab page id of the song panel.
+impl SongPanel {
+    /// The app closed a menu without a pick (Escape, a click elsewhere):
+    /// forget what was kept for it, so the next pick in another menu is
+    /// not taken for one here.
+    pub(crate) fn menu_dismissed(&mut self) {
+        self.menu = None;
+    }
+}
+
 #[cfg(test)]
 const SONG_TAB: usize = 2;
 /// The theme's content styles for the code-drawn lanes and parts (the
