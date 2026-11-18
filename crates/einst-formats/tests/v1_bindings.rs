@@ -140,3 +140,23 @@ fn dropped_bindings_are_listed() {
     let (_, dropped) = convert_binding_map(map, None);
     assert!(dropped.iter().any(|d| d.message == "e_setLayerModulationDepth"));
 }
+
+/// Repro: a graph-lane value that names no lane (non-finite or huge) drops
+/// the binding; it must neither overflow the lane arithmetic nor land on
+/// another lane.
+#[test]
+fn bad_graph_lane_drops_the_binding() {
+    for lane in ["inf", "1e30", "NaN"] {
+        let b = binding("MIDI2CC2Binding0", "e_setInstoMIDIGraphValue", [0, -1, -1, 0, 5, -1], &["0", lane], 0, "0");
+        let v1 = Node::parse(&format!(r#"<root StateVersion="2.1"><BindingMap name="Bindings" MIDI2CC2BindingCount="1">{b}</BindingMap></root>"#)).unwrap();
+        let map = v1.children_of("BindingMap").next().unwrap();
+        let converted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| convert_binding_map(map, Some(&v1))));
+        let (out, dropped) = converted.unwrap_or_else(|_| panic!("lane {lane}: the conversion panicked"));
+        let kept: Vec<String> = out
+            .children_of("Binding")
+            .filter_map(|b| b.children.iter().find(|c| c.name.as_deref() == Some("MessagePrototype")))
+            .map(|p| format!("{:?}", p.children.iter().filter_map(|v| v.attr("value")).collect::<Vec<_>>()))
+            .collect();
+        assert_eq!(dropped.len(), 1, "lane {lane}: kept as {kept:?}");
+    }
+}

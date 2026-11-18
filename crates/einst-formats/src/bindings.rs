@@ -88,13 +88,14 @@ fn v1_lane(i: usize) -> Option<&'static str> {
     let fx = STEP_LANES.iter().position(|l| *l == "FX1Active")?;
     match i {
         0..23 => HEAD[i],
-        _ => STEP_LANES.get(fx + i - 23).copied(),
+        _ => STEP_LANES.get(fx.checked_add(i - 23)?).copied(),
     }
 }
 
 /// v2 lane index of v1 lane `i`.
 fn lane(i: f32) -> Option<f32> {
-    if i < 0.0 {
+    // Not a lane: negative, NaN or infinite (a file's "inf" parses).
+    if !(i >= 0.0 && i.is_finite()) {
         return None;
     }
     let name = v1_lane(i as usize)?;
