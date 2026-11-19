@@ -17,14 +17,19 @@
 //! - Two AD envelopes (amp, filter) and one LFO with a toggle and a
 //!   unipolar / bipolar switch per target.
 //!
-//! [`render`] runs at twice [`RATE`] and decimates; the same patch always
+//! [`render`] runs at four times [`RATE`] and decimates, so the folder,
+//! FM, cross-modulation and drive alias little; the same patch always
 //! renders the same samples.
 
 use std::f32::consts::{PI, TAU};
 
 /// The rate of the rendered sample.
 pub const RATE: u32 = 48_000;
-const OS: usize = 2;
+/// The render's oversampling.
+const OS: usize = 4;
+/// The rate noise is made at (it holds between): the noise's colours and
+/// level do not follow the oversampling.
+const NOISE_RATE: usize = 2 * RATE as usize;
 
 /// The note an oscillator plays with its coarse and fine at the centre.
 pub const BASE_NOTE: f32 = 48.0;
@@ -206,7 +211,7 @@ impl Patch {
 
 /// Bumped when a change to the renderer changes its output, so old renders
 /// are not reused.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 const FADE: f32 = 0.005;
 
 fn clamp(p: P, x: f32) -> f32 {
@@ -354,6 +359,27 @@ fn saw(p: f32, dt: f32) -> f32 {
     2.0 * p - 1.0 - poly_blep(p, dt)
 }
 
+/// The residual of a band-limited ramp (a corner) `t` cycles from it, for
+/// a slope change of one per sample.
+fn poly_blamp(t: f32, dt: f32) -> f32 {
+    if t < dt {
+        let t = t / dt - 1.0;
+        -t * t * t / 6.0
+    } else if t > 1.0 - dt {
+        let t = (t - 1.0) / dt + 1.0;
+        t * t * t / 6.0
+    } else {
+        0.0
+    }
+}
+
+/// A triangle (-1 at phase 0, 1 at a half) with rounded corners: its slope
+/// turns by 8 per cycle at each.
+fn triangle(p: f32, dt: f32) -> f32 {
+    let naive = 1.0 - 4.0 * (p - 0.5).abs();
+    naive + 8.0 * dt * (poly_blamp(p, dt) - poly_blamp(wrap(p + 0.5), dt))
+}
+
 fn wrap(x: f32) -> f32 {
     x - x.floor()
 }
@@ -363,19 +389,31 @@ fn fold(x: f32) -> f32 {
     4.0 * (wrap((x - 1.0) / 4.0) - 0.5).abs() - 1.0
 }
 
-/// White, pink and brown noise, each about ±1 at its peaks.
+/// White, pink and brown noise, each about ±1 at its peaks, made every
+/// `hold` ticks.
 struct Noise {
     seed: u32,
     pink: [f32; 7],
     brown: f32,
+    hold: usize,
+    count: usize,
+    held: [f32; 3],
 }
 
 impl Noise {
     fn new(seed: u32) -> Noise {
-        Noise { seed, pink: [0.0; 7], brown: 0.0 }
+        Noise { seed, pink: [0.0; 7], brown: 0.0, hold: 1, count: 0, held: [0.0; 3] }
     }
 
     fn tick(&mut self) -> [f32; 3] {
+        if self.count == 0 {
+            self.held = self.next();
+        }
+        self.count = (self.count + 1) % self.hold;
+        self.held
+    }
+
+    fn next(&mut self) -> [f32; 3] {
         self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let w = (self.seed >> 8) as f32 / (1u32 << 23) as f32 - 1.0;
         // Pink: a sum of one-pole filters (-3 dB per octave).
@@ -443,8 +481,11 @@ impl Osc {
                 y
             }
             2 => {
-                let tri = 1.0 - 4.0 * (p - 0.5).abs();
-                (1.0 - shape) * saw(p, dt) + shape * tri
+                if shape <= 0.0 {
+                    saw(p, dt)
+                } else {
+                    (1.0 - shape) * saw(p, dt) + shape * triangle(p, dt)
+                }
             }
             3 => {
                 let mut sum = 0.0;
@@ -562,8 +603,14 @@ fn note_hz(semis: f32) -> f32 {
 
 /// Renders `patch` as a mono sample at [`RATE`].
 pub fn render(patch: &Patch) -> Vec<f32> {
+    render_at(patch, OS)
+}
+
+/// [`render`] at `os` times [`RATE`] (even).
+fn render_at(patch: &Patch, os: usize) -> Vec<f32> {
     use P::*;
-    let fs = (RATE as usize * OS) as f32;
+    let fs = (RATE as usize * os) as f32;
+    let hold = (RATE as usize * os / NOISE_RATE).max(1);
     let n = (patch.length() * fs).ceil() as usize;
     let g = |p| patch.get(p);
     let (w1, w2) = (patch.choice(Osc1Wave), patch.choice(Osc2Wave));
@@ -597,6 +644,9 @@ pub fn render(patch: &Patch) -> Vec<f32> {
     let (w3, sh3) = [(0, 0.0), (1, 0.0), (2, 1.0), (2, 0.0), (4, 0.0)][patch.choice(Osc3Wave).min(4)];
     let mut noise_src = Noise::new(5);
     let mut o3 = Osc::new(3, 0.0);
+    for n in [&mut noise_src, &mut o1.noise, &mut o2.noise, &mut o3.noise] {
+        n.hold = hold;
+    }
     let mix = g(FilterMix);
     let mut lfo = Lfo { phase: 0.0, held: 0.0, seed: 3 };
     let (mut f1, mut f2) = (Svf::default(), Svf::default());
@@ -642,25 +692,27 @@ pub fn render(patch: &Patch) -> Vec<f32> {
         }
         out.push(y);
     }
-    decimate(&out)
+    decimate(&out, os)
 }
 
-/// Halves the rate with a windowed-sinc low-pass.
-fn decimate(x: &[f32]) -> Vec<f32> {
-    const TAPS: usize = 63;
-    let mid = (TAPS / 2) as f32;
-    let h: Vec<f32> = (0..TAPS)
+/// Takes the rate down `os` times with a windowed-sinc low-pass at 0.9 of
+/// the new Nyquist.
+fn decimate(x: &[f32], os: usize) -> Vec<f32> {
+    let taps = 32 * os - 1;
+    let mid = (taps / 2) as f32;
+    let fc = 0.9 / os as f32;
+    let h: Vec<f32> = (0..taps)
         .map(|i| {
             let t = i as f32 - mid;
-            let sinc = if t == 0.0 { 1.0 } else { (PI * t * 0.45).sin() / (PI * t * 0.45) };
-            let w = 0.42 - 0.5 * (TAU * i as f32 / (TAPS - 1) as f32).cos() + 0.08 * (2.0 * TAU * i as f32 / (TAPS - 1) as f32).cos();
-            0.45 * sinc * w
+            let sinc = if t == 0.0 { 1.0 } else { (PI * t * fc).sin() / (PI * t * fc) };
+            let w = 0.42 - 0.5 * (TAU * i as f32 / (taps - 1) as f32).cos() + 0.08 * (2.0 * TAU * i as f32 / (taps - 1) as f32).cos();
+            fc * sinc * w
         })
         .collect();
     let norm: f32 = h.iter().sum();
-    (0..x.len() / OS)
+    (0..x.len() / os)
         .map(|o| {
-            let c = (o * OS) as isize;
+            let c = (o * os) as isize;
             let mut s = 0.0;
             for (j, hj) in h.iter().enumerate() {
                 let k = c + j as isize - mid as isize;
@@ -708,6 +760,74 @@ mod tests {
     fn crossings_hz(x: &[f32]) -> f32 {
         let n = x.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
         n as f32 * RATE as f32 / x.len() as f32
+    }
+
+    /// RMS of `a - b` over RMS of `b`.
+    fn rel_error(a: &[f32], b: &[f32]) -> f32 {
+        let d: f32 = a.iter().zip(b).map(|(x, y)| (x - y) * (x - y)).sum();
+        let r: f32 = b.iter().map(|y| y * y).sum();
+        (d / r).sqrt()
+    }
+
+    /// The share of `x`'s power off the harmonics of a tone `period` bins
+    /// apart (`x` holds a whole number of its cycles): its aliasing.
+    fn alias_share(x: &[f32], period: usize) -> f32 {
+        let n = x.len();
+        let table: Vec<(f32, f32)> = (0..n).map(|k| (TAU * k as f32 / n as f32).sin_cos()).collect();
+        let (mut off, mut all) = (0.0f32, 0.0f32);
+        for b in 1..n / 2 {
+            let (mut re, mut im) = (0.0f32, 0.0f32);
+            for (i, v) in x.iter().enumerate() {
+                let (s, c) = table[(b * i) % n];
+                re += v * c;
+                im -= v * s;
+            }
+            let pw = re * re + im * im;
+            all += pw;
+            if b % period != 0 {
+                off += pw;
+            }
+        }
+        off / all
+    }
+
+    /// The rounded corners cut a high triangle's aliasing.
+    #[test]
+    fn triangle_corners_alias_less() {
+        // 2990 Hz: 299 whole cycles in 4800 samples, harmonics every 299
+        // bins, the aliases between them.
+        let dt = 2990.0f32 / 48_000.0;
+        let ps: Vec<f32> = (0..4800).map(|i| wrap(i as f32 * dt)).collect();
+        let naive: Vec<f32> = ps.iter().map(|&p| 1.0 - 4.0 * (p - 0.5).abs()).collect();
+        let smooth: Vec<f32> = ps.iter().map(|&p| triangle(p, dt)).collect();
+        let (a, b) = (alias_share(&naive, 299), alias_share(&smooth, 299));
+        assert!(b < 0.1 * a, "rounded {b} vs naive {a}");
+    }
+
+    /// A folded sine swept high aliases less at four times the rate than at
+    /// two (measured against sixteen times).
+    #[test]
+    fn oversampling_cuts_aliasing() {
+        let mut p = Patch::default();
+        for (k, v) in [(P::Osc1Wave, 0.0), (P::Osc1Shape, 1.0), (P::Osc1Coarse, 1.0), (P::Osc1PitchAmount, 1.0), (P::Osc1PitchDecay, 1.0), (P::FilterMix, 0.0), (P::AmpDecay, 1.0)] {
+            p.set(k, v);
+        }
+        let window = |x: Vec<f32>| x[2400..14_400].to_vec();
+        let reference = window(render_at(&p, 16));
+        let (e2, e4) = (rel_error(&window(render_at(&p, 2)), &reference), rel_error(&window(render_at(&p, 4)), &reference));
+        assert!(e4 < 0.5 * e2, "4x {e4} vs 2x {e2}");
+    }
+
+    /// Noise keeps its level and colour whatever the oversampling.
+    #[test]
+    fn noise_does_not_follow_the_oversampling() {
+        let mut p = Patch::default();
+        for (k, v) in [(P::Osc1Level, 0.0), (P::NoiseLevel, 0.5), (P::NoiseColour, 0.5), (P::FilterMix, 0.0), (P::AmpDecay, 1.0)] {
+            p.set(k, v);
+        }
+        let rms = |x: &[f32]| (x[2400..24_000].iter().map(|v| v * v).sum::<f32>() / 21_600.0).sqrt();
+        let (a, b) = (rms(&render_at(&p, 2)), rms(&render_at(&p, 4)));
+        assert!((20.0 * (b / a).log10()).abs() < 0.5, "2x {a} vs 4x {b}");
     }
 
     #[test]
