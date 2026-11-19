@@ -271,6 +271,45 @@ fn spread_octaves(x: f32) -> f32 {
 }
 
 /// The text a panel shows for `p` at `v`.
+/// The sine's gain into the folder at `shape`.
+fn fold_gain(shape: f32) -> f32 {
+    1.0 + 4.0 * shape
+}
+
+/// The square's pulse width (of a cycle) at `shape`.
+fn pulse_width(shape: f32) -> f32 {
+    0.5 - 0.45 * shape
+}
+
+/// The supersaw's outer voices' detune in semitones at `shape`.
+fn super_detune(shape: f32) -> f32 {
+    shape * shape * 0.6 + 0.04
+}
+
+/// What an oscillator's Shape does on `wave` (Osc 1 and Osc 2's waves):
+/// its knob's label.
+pub fn shape_label(wave: usize) -> &'static str {
+    match wave {
+        0 => "Fold",
+        1 => "Width",
+        2 => "Tri",
+        3 => "Detune",
+        _ => "Shape",
+    }
+}
+
+/// Shape `v` on `wave`, as its knob shows it.
+pub fn shape_display(wave: usize, v: f32) -> String {
+    match wave {
+        0 => format!("x{:.1}", fold_gain(v)),
+        1 => format!("{:.0} %", pulse_width(v) * 100.0),
+        2 => format!("{:.0} %", v * 100.0),
+        3 => format!("{:.0} ct", super_detune(v) * 100.0),
+        // Noise has no shape.
+        _ => "-".into(),
+    }
+}
+
 pub fn display(p: P, v: f32) -> String {
     use P::*;
     let info = PARAMS[p as usize];
@@ -458,7 +497,7 @@ impl Osc {
             s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             *p = (s >> 8) as f32 / (1u32 << 24) as f32;
         }
-        let detune = shape * shape * 0.6 + 0.04;
+        let detune = super_detune(shape);
         let ratios = SUPER_SPREAD.map(|s| 2f32.powf(s * detune / 12.0));
         Osc { phase: 0.0, supers, ratios, last: 0.0, noise: Noise::new(seed.wrapping_mul(7919)) }
     }
@@ -472,9 +511,9 @@ impl Osc {
         self.last = p;
         self.phase = wrap(self.phase + inc);
         match wave {
-            0 => fold((TAU * p).sin() * (1.0 + 4.0 * shape)),
+            0 => fold((TAU * p).sin() * fold_gain(shape)),
             1 => {
-                let pw = 0.5 - 0.45 * shape;
+                let pw = pulse_width(shape);
                 let mut y = if p < pw { 1.0 } else { -1.0 };
                 y += poly_blep(p, dt);
                 y -= poly_blep(wrap(p - pw + 1.0), dt);
@@ -828,6 +867,16 @@ mod tests {
         let rms = |x: &[f32]| (x[2400..24_000].iter().map(|v| v * v).sum::<f32>() / 21_600.0).sqrt();
         let (a, b) = (rms(&render_at(&p, 2)), rms(&render_at(&p, 4)));
         assert!((20.0 * (b / a).log10()).abs() < 0.5, "2x {a} vs 4x {b}");
+    }
+
+    #[test]
+    fn shape_names_follow_the_wave() {
+        let names: Vec<_> = (0..OSC2_WAVES.len()).map(shape_label).collect();
+        assert_eq!(names, ["Fold", "Width", "Tri", "Detune", "Shape", "Shape", "Shape"]);
+        assert_eq!(shape_display(0, 1.0), "x5.0");
+        assert_eq!((shape_display(1, 0.0), shape_display(1, 1.0)), ("50 %".into(), "5 %".into()));
+        assert_eq!(shape_display(3, 0.0), "4 ct");
+        assert_eq!(shape_display(5, 0.3), "-");
     }
 
     #[test]

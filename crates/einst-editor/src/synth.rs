@@ -1107,7 +1107,19 @@ impl SynthPanel {
                 let v = self.patch.get(k);
                 let bipolar = matches!(k, P::FilterEnv | P::Osc1Coarse | P::Osc2Coarse | P::Osc1Fine | P::Osc2Fine | P::Osc1PitchAmount | P::Osc2PitchAmount);
                 let active = self.drag.is_some_and(|(d, ..)| d == Drag::Param(k));
-                draw_knob(p, font, rc, PARAMS[k as usize].label, v, &dsp::display(k, v), bipolar, active);
+                // An oscillator's Shape is named for what it does on the
+                // oscillator's wave.
+                let wave = match k {
+                    P::Osc1Shape => Some(P::Osc1Wave),
+                    P::Osc2Shape => Some(P::Osc2Wave),
+                    _ => None,
+                }
+                .map(|w| self.patch.get(w).round().max(0.0) as usize);
+                let (label, value) = match wave {
+                    Some(w) => (dsp::shape_label(w), dsp::shape_display(w, v)),
+                    None => (PARAMS[k as usize].label, dsp::display(k, v)),
+                };
+                draw_knob(p, font, rc, label, v, &value, bipolar, active);
             }
             Cell::Amount => {
                 let active = self.drag.is_some_and(|(d, ..)| d == Drag::Amount);
