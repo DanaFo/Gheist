@@ -194,8 +194,11 @@ impl Editor {
                     }
                     self.model.utility_tab = front::BROWSER_PAGE;
                 }
+                // The panel shows on the sync after a change.
+                let mut changed = o.changed;
                 if let Some(l) = o.synth {
                     self.open_synth(l);
+                    changed = true;
                 }
                 if let Some(l) = o.save {
                     let e = self.model.engine;
@@ -210,7 +213,7 @@ impl Editor {
                         }
                     }
                 }
-                o.changed
+                changed
             }
             _ => false,
         }

@@ -5052,6 +5052,21 @@ fn synth_panel_renders_onto_the_layer() {
     assert!(einst::synth::patch_of(ed.model.layer_node(e, pad, 2).unwrap()).is_none());
 }
 
+/// The pad menu's Synth on layer opens the panel at once (no other event
+/// has to sync the editor first).
+#[test]
+fn the_pad_menu_opens_the_synth_panel_at_once() {
+    crate::app::test_setup();
+    let Ok(mut ed) = Editor::new(dreist_gui::skin::default_theme(), Model::new(project::new_document())) else { return };
+    ed.render(1.0);
+    let path = pad_menu_pick(&mut ed, 0, "Synth on layer \u{25b8}");
+    let items = ed.app.menu.as_ref().expect("the layer menu").items.clone();
+    let i = items.iter().position(|s| s.starts_with("Layer 2")).unwrap_or_else(|| panic!("{items:?}"));
+    ed.handle(&UiEvent::MenuSelected { anchor: path, name: "EditorPad".into(), index: i });
+    let panel = ed.synth.panel_path().unwrap();
+    assert!(ed.app.ctrl(&panel[..panel.len() - 1]).is_some_and(|o| o.visible), "the overlay shows");
+}
+
 /// The synth panel repaints as its knobs move, also when it opened after
 /// the window's first frame (nothing behind it changes).
 #[test]
