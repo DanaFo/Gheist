@@ -50,6 +50,7 @@ const TEXT: Colour = Colour::rgba(214, 214, 214, 255);
 const DIM: Colour = Colour::rgba(140, 142, 148, 255);
 const ACCENT: Colour = Colour::rgba(232, 131, 58, 255);
 const TRACK: Colour = Colour::rgba(72, 74, 80, 255);
+const PRESSED: Colour = Colour::rgba(112, 115, 124, 255);
 
 /// The panel's buttons.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -98,11 +99,11 @@ use Cell::{Button as B, Choice as C, Knob as K, Toggle as T};
 
 const OSC1: &[Cell] = &[C(P::Osc1Wave), K(P::Osc1Coarse), K(P::Osc1Fine), K(P::Osc1Shape), K(P::Osc1Level)];
 const OSC2: &[Cell] = &[C(P::Osc2Wave), K(P::Osc2Coarse), K(P::Osc2Fine), K(P::Osc2Shape), K(P::Osc2Level)];
-const OSC3: &[Cell] = &[K(P::Osc3Ratio), K(P::Osc3ToOsc1), K(P::Osc3ToOsc2), K(P::Osc3ToFilter)];
+const OSC3: &[Cell] = &[C(P::Osc3Wave), K(P::Osc3Ratio), K(P::Osc3ToOsc1), K(P::Osc3ToOsc2), K(P::Osc3ToFilter)];
 const XMOD: &[Cell] = &[K(P::XMod)];
 const AMP: &[Cell] = &[K(P::AmpAttack), K(P::AmpDecay)];
 const FENV: &[Cell] = &[K(P::FilterAttack), K(P::FilterDecay)];
-const FILTER: &[Cell] = &[K(P::Cutoff), K(P::Resonance), K(P::Spread), K(P::Drive), K(P::Clip), K(P::FilterEnv)];
+const FILTER: &[Cell] = &[K(P::Cutoff), K(P::Resonance), K(P::Spread), K(P::Drive), K(P::Clip), K(P::FilterMix), K(P::FilterEnv)];
 const LFO: &[Cell] = &[C(P::LfoShape), K(P::LfoRate), K(P::LfoDepth), T(P::LfoOsc1), T(P::LfoOsc2), T(P::LfoCutoff), T(P::LfoResonance), T(P::LfoSpread)];
 const OUT: &[Cell] = &[K(P::Volume)];
 /// Buttons: two rows of three.
@@ -201,6 +202,8 @@ pub struct SynthPanel {
     status: String,
     /// The last render, for Play.
     render: Option<PathBuf>,
+    /// The button held down.
+    pressed: Option<Button>,
 }
 
 /// The renders folder: `Synth Renders` in the settings folder (as
@@ -281,6 +284,7 @@ impl SynthPanel {
             request: None,
             status: String::new(),
             render: None,
+            pressed: None,
         }
     }
 
@@ -316,11 +320,29 @@ impl SynthPanel {
 
     pub fn sync(&self, app: &mut App) {
         let open = self.open.is_some();
+        let stamp = self.stamp();
         if let Some(o) = self.overlay.clone().and_then(|p| app.ctrl_mut(&p)) {
             if o.visible != open {
                 o.visible = open;
             }
+            // The panel draws from this state, not from its control: the
+            // stamp changes the control's drawn state, so the app repaints
+            // the panel whenever what it shows changes.
+            if let Some(panel) = o.children.first_mut() {
+                if panel.attr("state") != Some(stamp.as_str()) {
+                    panel.set_attr("state", stamp);
+                }
+            }
         }
+    }
+
+    /// A fingerprint of everything the panel shows.
+    fn stamp(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.patch.v.iter().for_each(|v| v.to_bits().hash(&mut h));
+        (self.open, self.drag.map(|(p, ..)| p as usize), self.audition, self.pressed.map(|b| b as usize), &self.status, &self.render).hash(&mut h);
+        format!("{:016x}", h.finish())
     }
 
     pub(crate) fn panel_path(&self) -> Option<Vec<usize>> {
@@ -420,36 +442,43 @@ impl SynthPanel {
                 self.set(p, v);
                 self.commit(model, out);
             }
-            Cell::Button(b) => match b {
-                Button::Audition => {
-                    self.audition = !self.audition;
-                    let mut o = crate::options::Options::load();
-                    o.set("SynthAudition", self.audition);
-                    o.save();
-                }
-                Button::Play => {
-                    if self.render.is_none() {
-                        self.commit(model, out);
-                    }
-                    self.play(out);
-                }
-                Button::Init => {
-                    self.patch = Patch::default();
+            Cell::Button(b) => {
+                self.pressed = Some(b);
+                self.button(app, model, b, &anchor, out);
+            }
+        }
+    }
+
+    fn button(&mut self, app: &mut App, model: &mut Model, b: Button, anchor: &[usize], out: &mut Vec<Command>) {
+        match b {
+            Button::Audition => {
+                self.audition = !self.audition;
+                let mut o = crate::options::Options::load();
+                o.set("SynthAudition", self.audition);
+                o.save();
+            }
+            Button::Play => {
+                if self.render.is_none() {
                     self.commit(model, out);
                 }
-                Button::Load => {
-                    let presets = presets_in(&presets_dir());
-                    let mut items: Vec<String> = presets.iter().map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()).collect();
-                    if !items.is_empty() {
-                        items.push(String::new());
-                    }
-                    items.push("Browse...".into());
-                    app.open_menu(&anchor, items, None);
-                    self.menu = Some(Menu::Presets(presets));
+                self.play(out);
+            }
+            Button::Init => {
+                self.patch = Patch::default();
+                self.commit(model, out);
+            }
+            Button::Load => {
+                let presets = presets_in(&presets_dir());
+                let mut items: Vec<String> = presets.iter().map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()).collect();
+                if !items.is_empty() {
+                    items.push(String::new());
                 }
-                Button::Save => self.request = Some(Request::SavePreset),
-                Button::Close => self.close(),
-            },
+                items.push("Browse...".into());
+                app.open_menu(anchor, items, None);
+                self.menu = Some(Menu::Presets(presets));
+            }
+            Button::Save => self.request = Some(Request::SavePreset),
+            Button::Close => self.close(),
         }
     }
 
@@ -469,6 +498,7 @@ impl SynthPanel {
                         }
                     }
                     MouseKind::Up => {
+                        self.pressed = None;
                         if self.drag.take().is_some() && std::mem::take(&mut self.dragged) {
                             self.commit(model, out);
                         }
@@ -570,7 +600,14 @@ impl SynthPanel {
                 Cell::Button(b) => {
                     let on = b == Button::Audition && self.audition;
                     let br = button_rect(rc);
-                    p.fill_rounded(br, 3.0, [true; 4], if on { ACCENT } else { TRACK });
+                    let fill = if self.pressed == Some(b) {
+                        PRESSED
+                    } else if on {
+                        ACCENT
+                    } else {
+                        TRACK
+                    };
+                    p.fill_rounded(br, 3.0, [true; 4], fill);
                     p.text(br, b.label(), if on { BG } else { TEXT }, &font, HAlign::Center, VAlign::Center);
                 }
             }

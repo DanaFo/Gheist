@@ -2,12 +2,14 @@
 //! render like any other sample.
 //!
 //! - Osc 1 and Osc 2 (sine, square, saw, supersaw) with Osc 2 cross-modulating
-//!   Osc 1; Osc 3 is a sine FM operator aimed at Osc 1, Osc 2 and the cutoff.
+//!   Osc 1; Osc 3 is an FM operator (sine, square, triangle, saw) aimed at
+//!   Osc 1, Osc 2 and the cutoff.
 //! - Each oscillator goes through its own mixer channel, which overdrives
 //!   asymmetrically above unity.
 //! - The filter is two state-variable low-passes whose peaks sit `spread`
 //!   octaves apart, with a pre drive and a post clip. Resonance reaches
-//!   self-oscillation (a sine) at 80 %; the last 20 % soft-clip it.
+//!   self-oscillation (a sine) at 80 %; the last 20 % soft-clip it. Mix
+//!   blends the filter's input back in before the post clip.
 //! - Two AD envelopes (amp, filter) and one LFO with a toggle per target.
 //!
 //! [`render`] runs at twice [`RATE`] and decimates; the same patch always
@@ -48,6 +50,8 @@ pub struct ParamInfo {
 pub const WAVES: &[&str] = &["Sine", "Square", "Saw", "Supersaw"];
 /// LFO shapes.
 pub const LFO_SHAPES: &[&str] = &["Sine", "Triangle", "Saw", "Square", "S&H"];
+/// Osc 3's waves.
+pub const OSC3_WAVES: &[&str] = &["Sine", "Square", "Triangle", "Saw"];
 
 macro_rules! params {
     ($($name:ident = $id:literal, $label:literal, $kind:expr, $default:expr;)*) => {
@@ -76,6 +80,7 @@ params! {
     Osc2Shape = "osc2_shape", "Shape", Kind::Knob, 0.0;
     Osc2Level = "osc2_level", "Level", Kind::Knob, 0.0;
     XMod = "xmod", "X-Mod", Kind::Knob, 0.0;
+    Osc3Wave = "osc3_wave", "Wave", Kind::Choice(OSC3_WAVES), 0.0;
     Osc3Ratio = "osc3_ratio", "Ratio", Kind::Knob, 1.0 / 3.0;
     Osc3ToOsc1 = "osc3_osc1", "> Osc 1", Kind::Knob, 0.0;
     Osc3ToOsc2 = "osc3_osc2", "> Osc 2", Kind::Knob, 0.0;
@@ -85,6 +90,7 @@ params! {
     Spread = "spread", "Spread", Kind::Knob, 0.0;
     Drive = "drive", "Drive", Kind::Knob, 0.0;
     Clip = "clip", "Clip", Kind::Knob, 0.0;
+    FilterMix = "filter_mix", "Mix", Kind::Knob, 1.0;
     FilterEnv = "filter_env", "Env", Kind::Knob, 0.5;
     AmpAttack = "amp_attack", "Attack", Kind::Knob, 0.0;
     AmpDecay = "amp_decay", "Decay", Kind::Knob, 0.8;
@@ -176,7 +182,7 @@ impl Patch {
 
 /// Bumped when a change to the renderer changes its output, so old renders
 /// are not reused.
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 const FADE: f32 = 0.005;
 
 fn clamp(p: P, x: f32) -> f32 {
@@ -498,7 +504,11 @@ pub fn render(patch: &Patch) -> Vec<f32> {
     let volume = volume_gain(g(Volume));
 
     let (mut o1, mut o2) = (Osc::new(1, g(Osc1Shape)), Osc::new(2, g(Osc2Shape)));
-    let mut o3 = 0.0f32;
+    // Osc 3 as an oscillator wave and shape: the triangle is the saw's
+    // full triangle blend.
+    let (w3, sh3) = [(0, 0.0), (1, 0.0), (2, 1.0), (2, 0.0)][patch.choice(Osc3Wave).min(3)];
+    let mut o3 = Osc::new(3, 0.0);
+    let mix = g(FilterMix);
     let mut lfo = Lfo { phase: 0.0, held: 0.0, seed: 3 };
     let (mut f1, mut f2) = (Svf::default(), Svf::default());
     let (mut dc_x, mut dc_y) = (0.0f32, 0.0f32);
@@ -510,8 +520,7 @@ pub fn render(patch: &Patch) -> Vec<f32> {
     for i in 0..n {
         let t = i as f32 / fs;
         let l = lfo.tick(lfo_shape, lfo_inc);
-        let m3 = (TAU * o3).sin();
-        o3 = wrap(o3 + f3 / fs);
+        let m3 = o3.tick(w3, f3 / fs, 0.0, sh3);
         let inc1 = note_hz(s1 + l * lo1 * 12.0) / fs;
         let inc2 = note_hz(s2 + l * lo2 * 12.0) / fs;
         let y2 = o2.tick(w2, inc2, pm3[1] * m3, g(Osc2Shape));
@@ -533,6 +542,7 @@ pub fn render(patch: &Patch) -> Vec<f32> {
         let b = f2.lowpass(x, gain(fc * 2f32.powf(half)), k);
         let rc = reso_clip(r);
         let y = 0.5 * (soft(a, rc) + soft(b, rc));
+        let y = x + mix * (y - x);
         let mut y = soft(y, post) * amp.at(t) * volume;
         if i >= fade_from {
             y *= (n - i) as f32 / (n - fade_from) as f32;
@@ -699,6 +709,48 @@ mod tests {
         let w = &x[RATE as usize / 4..RATE as usize / 2];
         // Peaks at 707 Hz and 1414 Hz: the crossings count no longer reads 1 kHz.
         assert!((crossings_hz(w) - 1000.0).abs() > 60.0);
+    }
+
+    /// Osc 3's waves give Osc 1 different FM spectra; at zero amount they
+    /// change nothing.
+    #[test]
+    fn osc3_waves_modulate_differently() {
+        let mut p = Patch::default();
+        p.set(P::Osc1Wave, 0.0);
+        p.set(P::Cutoff, 1.0);
+        let plain = render(&p);
+        p.set(P::Osc3Wave, 2.0);
+        assert_eq!(render(&p), plain, "no amount, no change");
+        p.set(P::Osc3ToOsc1, 0.6);
+        let renders: Vec<Vec<f32>> = (0..4)
+            .map(|w| {
+                p.set(P::Osc3Wave, w as f32);
+                render(&p)
+            })
+            .collect();
+        for i in 0..4 {
+            assert!(renders[i].iter().all(|v| v.is_finite()));
+            assert_ne!(renders[i], plain);
+            for j in i + 1..4 {
+                assert_ne!(renders[i], renders[j], "waves {i} and {j}");
+            }
+        }
+    }
+
+    /// Mix at 0 bypasses the filter: a closed filter lets the saw through.
+    #[test]
+    fn mix_blends_the_dry_signal_back() {
+        let energy = |x: &[f32]| x.iter().map(|v| v * v).sum::<f32>();
+        let mut p = Patch::default();
+        p.set(P::Cutoff, 0.0);
+        p.set(P::Resonance, 0.0);
+        let closed = energy(&render(&p));
+        p.set(P::FilterMix, 0.0);
+        let dry = energy(&render(&p));
+        p.set(P::FilterMix, 0.5);
+        let half = energy(&render(&p));
+        assert!(dry > closed * 20.0, "dry {dry} closed {closed}");
+        assert!(half > closed && half < dry);
     }
 
     #[test]

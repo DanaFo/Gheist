@@ -5051,3 +5051,36 @@ fn synth_panel_renders_onto_the_layer() {
     assert!(crate::browser::load_sample_into_layer(&mut ed.model, e, pad, 2, &wav));
     assert!(einst::synth::patch_of(ed.model.layer_node(e, pad, 2).unwrap()).is_none());
 }
+
+/// The synth panel repaints as its knobs move, also when it opened after
+/// the window's first frame (nothing behind it changes).
+#[test]
+fn synth_panel_repaints_its_knobs() {
+    crate::app::test_setup();
+    use dreist_gui::app::MouseKind;
+    let Ok(mut ed) = Editor::new(dreist_gui::skin::default_theme(), Model::new(project::new_document())) else { return };
+    ed.render(1.0);
+    ed.open_synth(0);
+    ed.sync();
+    ed.render_frame(1.0);
+    let panel = ed.synth.panel_path().unwrap();
+    let (px, py) = ed.app.origin(&panel);
+    // Osc 1's Coarse knob (first row, second cell).
+    let (x, y) = (10.0 + 8.0 + 76.0 + 28.0, 28.0 + 6.0 + 16.0 + 30.0);
+    let crop = |pm: &dreist_gui::tiny_skia::Pixmap| -> Vec<u8> {
+        let mut v = Vec::new();
+        for yy in (py + y as i32 - 20)..(py + y as i32 + 30) {
+            for xx in (px + x as i32 - 28)..(px + x as i32 + 28) {
+                v.extend_from_slice(&pm.data()[(yy as usize * pm.width() as usize + xx as usize) * 4..][..4]);
+            }
+        }
+        v
+    };
+    let before = crop(ed.render_frame(1.0));
+    let ev = |kind, y: f32| UiEvent::Mouse { path: panel.clone(), overload: crate::synth::OVERLOAD.into(), kind, x, y };
+    ed.handle(&ev(MouseKind::Down, y));
+    ed.handle(&ev(MouseKind::Drag, y - 60.0));
+    let after = crop(ed.render_frame(1.0));
+    assert!(ed.synth.patch().get(einst_dsp::synth::P::Osc1Coarse) > 0.6);
+    assert_ne!(before, after, "the knob repaints");
+}
