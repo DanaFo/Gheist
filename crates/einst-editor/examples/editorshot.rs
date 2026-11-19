@@ -6,7 +6,8 @@
 //! `DREIST_RIGHT=1` right-clicks it instead, `DREIST_MENU=a|b` then picks the
 //! open menu's items ending in a, then b (`#3` picks index 3),
 //! `DREIST_HOVER=1` leaves the pointer there and shows its tooltip;
-//! `DREIST_SYNTH=1` opens the synth panel on the selected pad's first layer).
+//! `DREIST_SYNTH=1` opens the synth panel on the selected pad's first layer,
+//! `DREIST_SYNTH=n` (n > 1) with factory preset n rendered onto it first).
 
 use einst_editor::{Editor, Model};
 
@@ -74,7 +75,13 @@ fn main() {
             ed.handle(&dreist_gui::app::UiEvent::MenuSelected { anchor: m.anchor.clone(), name: String::new(), index: i });
         }
     }
-    if std::env::var("DREIST_SYNTH").is_ok() {
+    if let Ok(v) = std::env::var("DREIST_SYNTH") {
+        if let Some(i) = v.parse::<usize>().ok().filter(|&i| i > 1) {
+            let patch = einst_editor::synth::factory_patch(i);
+            let file = einst::synth::render_to(&std::env::temp_dir().join("einst-editorshot-synth"), &patch).expect("render");
+            let (e, p) = (ed.model.engine, ed.model.pad[ed.model.engine]);
+            einst_editor::synth::assign(&mut ed.model, e, p, 0, &patch, &file);
+        }
         ed.open_synth(0);
         ed.sync();
     }

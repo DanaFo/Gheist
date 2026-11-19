@@ -51,8 +51,9 @@ const DRAG_RANGE: f32 = 200.0;
 const RX: f32 = 720.0;
 const RW: f32 = W - RX - GAP;
 const ITEM_H: f32 = 18.0;
-/// The scope's columns.
-const SCOPE_COLS: usize = (RW - 2.0 * PAD) as usize;
+/// The scope's bins across: three per logical pixel, finer than a device
+/// pixel up to a 300 % UI scale.
+const SCOPE_BINS: usize = 3 * (RW - 2.0 * PAD) as usize;
 /// The scope's close-up of the start, in seconds.
 const ZOOM: f32 = 0.04;
 
@@ -169,6 +170,7 @@ pub enum Button {
     Close,
     Randomize,
     Dice,
+    ResetDots,
     Prev,
     Next,
 }
@@ -184,6 +186,7 @@ impl Button {
             Button::Close => "Close",
             Button::Randomize => "Randomize",
             Button::Dice => "Dice dots",
+            Button::ResetDots => "Reset dots",
             Button::Prev => "<",
             Button::Next => ">",
         }
@@ -249,7 +252,7 @@ const LFO: &[&[Cell]] = &[
     &[TG(P::LfoSpread, P::LfoSpreadBi)],
 ];
 const OUT: &[&[Cell]] = &[&[K(P::Volume)]];
-const RANDOM: &[&[Cell]] = &[&[AMT], &[B(Button::Randomize), B(Button::Dice)]];
+const RANDOM: &[&[Cell]] = &[&[AMT], &[B(Button::Randomize), B(Button::Dice)], &[B(Button::ResetDots)]];
 const PATCH: &[&[Cell]] = &[&[B(Button::Audition), B(Button::Load)], &[B(Button::Play), B(Button::Save)], &[B(Button::Init), B(Button::Close)]];
 
 const ROWS: &[&[Section]] = &[
@@ -314,8 +317,9 @@ fn box_rect(r: &RectF) -> RectF {
     RectF::new(r.x + 4.0, r.y + 24.0, r.w - 8.0, 22.0)
 }
 
+/// A button, at the top of its cell (no taller than a stacked one).
 fn button_rect(r: &RectF) -> RectF {
-    RectF::new(r.x + 3.0, r.y + 4.0, r.w - 6.0, r.h - 8.0)
+    RectF::new(r.x + 3.0, r.y + 4.0, r.w - 6.0, (r.h - 8.0).min(29.0))
 }
 
 /// A target's on / off switch and its Uni / Bi switch.
@@ -395,11 +399,14 @@ fn preset_items() -> Vec<Item> {
     factory.chain(user).collect()
 }
 
-/// What the scope shows: per column, the lowest and highest sample.
+/// What the scope shows: all of the render as the lowest and highest
+/// sample per bin ([`SCOPE_BINS`] across), and the start's samples.
 #[derive(Debug, Default)]
 struct Scope {
     all: Vec<(f32, f32)>,
-    start: Vec<(f32, f32)>,
+    start: Vec<f32>,
+    /// The samples the start view spans.
+    start_len: usize,
     secs: f32,
 }
 
@@ -414,8 +421,20 @@ fn bins(x: &[f32], cols: usize) -> Vec<(f32, f32)> {
 }
 
 fn scope_of(x: &[f32], sr: f32) -> Scope {
-    let n = ((ZOOM * sr) as usize).min(x.len());
-    Scope { all: bins(x, SCOPE_COLS), start: bins(&x[..n], SCOPE_COLS), secs: x.len() as f32 / sr }
+    let span = (ZOOM * sr) as usize;
+    Scope { all: bins(x, SCOPE_BINS), start: x[..span.min(x.len())].to_vec(), start_len: span.max(2), secs: x.len() as f32 / sr }
+}
+
+/// The scope's view of `cols` bins: the band between their highest and
+/// lowest samples, at least `min` high (logical pixels).
+fn envelope(view: &RectF, cols: &[(f32, f32)], min: f32) -> Vec<(f32, f32)> {
+    let mid = view.y + view.h / 2.0;
+    let half = view.h / 2.0 - 1.0;
+    let x = |i: usize| view.x + (i as f32 + 0.5) * view.w / cols.len() as f32;
+    let top: Vec<f32> = cols.iter().map(|&(_, hi)| mid - hi.clamp(-1.0, 1.0) * half).collect();
+    let mut pts: Vec<(f32, f32)> = top.iter().enumerate().map(|(i, &y)| (x(i), y)).collect();
+    pts.extend(cols.iter().enumerate().rev().map(|(i, &(lo, _))| (x(i), (mid - lo.clamp(-1.0, 1.0) * half).max(top[i] + min))));
+    pts
 }
 
 /// Moves the parameters not `off` towards random values by `amount`
@@ -446,6 +465,19 @@ fn randomize(patch: &mut Patch, off: &[bool], amount: f32, rand: &mut impl FnMut
         };
         patch.set(p, nv);
     }
+}
+
+/// The controls Randomize leaves out at first (and after Reset dots):
+/// the volume.
+fn default_random_off() -> [bool; COUNT] {
+    let mut off = [false; COUNT];
+    off[P::Volume as usize] = true;
+    off
+}
+
+/// The ids of the parameters `off`, comma-separated (the option).
+fn off_ids(off: &[bool; COUNT]) -> String {
+    P::ALL.iter().filter(|p| off[**p as usize]).map(|p| PARAMS[*p as usize].id).collect::<Vec<_>>().join(",")
 }
 
 /// The knob being dragged.
@@ -557,9 +589,8 @@ impl SynthPanel {
         };
         root.children.push(overlay);
         let o = crate::options::Options::load();
-        let off_ids = o.string(OPT_RANDOM_OFF, PARAMS[P::Volume as usize].id);
         let mut random_off = [false; COUNT];
-        for id in off_ids.split(',') {
+        for id in o.string(OPT_RANDOM_OFF, &off_ids(&default_random_off())).split(',') {
             if let Some(p) = PARAMS.iter().position(|i| i.id == id) {
                 random_off[p] = true;
             }
@@ -781,8 +812,7 @@ impl SynthPanel {
 
     fn save_random(&self) {
         let mut o = crate::options::Options::load();
-        let off: Vec<&str> = P::ALL.iter().filter(|p| self.random_off[**p as usize]).map(|p| PARAMS[*p as usize].id).collect();
-        o.set(OPT_RANDOM_OFF, off.join(","));
+        o.set(OPT_RANDOM_OFF, off_ids(&self.random_off));
         o.set(OPT_RANDOM_AMOUNT, (self.amount * 100.0).round() as i64);
         o.save();
     }
@@ -912,6 +942,10 @@ impl SynthPanel {
                         self.set_dot(cell, on);
                     }
                 }
+                self.save_random();
+            }
+            Button::ResetDots => {
+                self.random_off = default_random_off();
                 self.save_random();
             }
             Button::Load => self.request = Some(Request::OpenPreset),
@@ -1168,17 +1202,23 @@ impl SynthPanel {
             p.text(RectF::new(s.x + PAD, s.y + 2.0, s.w - 2.0 * PAD, 14.0), &len, DIM, font, HAlign::Right, VAlign::Center);
         }
         p.text(RectF::new(start.x, start.y - 17.0, start.w, 16.0), &format!("First {:.0} ms", ZOOM * 1000.0), DIM, font, HAlign::Left, VAlign::Center);
-        for (view, cols) in [(all, self.scope.as_ref().map(|s| &s.all)), (start, self.scope.as_ref().map(|s| &s.start))] {
+        for view in [all, start] {
             p.fill_rect(view, WELL);
             let mid = view.y + view.h / 2.0;
             p.line(view.x, mid, view.x + view.w, mid, TRACK, 1.0);
-            let half = view.h / 2.0 - 1.0;
-            for (i, &(lo, hi)) in cols.into_iter().flatten().enumerate() {
-                let x = view.x + i as f32 + 0.5;
-                let y0 = mid - hi.clamp(-1.0, 1.0) * half;
-                let y1 = (mid - lo.clamp(-1.0, 1.0) * half).max(y0 + 1.0);
-                p.line(x, y0, x, y1, ACCENT, 1.0);
-            }
+        }
+        let Some(sc) = &self.scope else { return };
+        // All of it: the band of each bin's samples (anti-aliased, finer
+        // than a pixel at any UI scale).
+        if !sc.all.is_empty() {
+            p.fill_polygon(&envelope(&all, &sc.all, 0.75), ACCENT);
+        }
+        // The start: the samples themselves, joined.
+        let (mid, half) = (start.y + start.h / 2.0, start.h / 2.0 - 1.0);
+        let step = start.w / (sc.start_len - 1) as f32;
+        let pts: Vec<(f32, f32)> = sc.start.iter().enumerate().map(|(i, v)| (start.x + i as f32 * step, mid - v.clamp(-1.0, 1.0) * half)).collect();
+        if pts.len() > 1 {
+            p.polyline(&pts, ACCENT, 1.25);
         }
     }
 }
@@ -1309,13 +1349,18 @@ mod tests {
     fn the_scope_bins_the_render() {
         let x: Vec<f32> = (0..48_000).map(|i| if i < 24_000 { 0.5 } else { -0.25 }).collect();
         let s = scope_of(&x, 48_000.0);
-        assert_eq!(s.all.len(), SCOPE_COLS);
+        assert_eq!(s.all.len(), SCOPE_BINS);
         assert_eq!(s.all[0], (0.5, 0.5));
         assert_eq!(*s.all.last().unwrap(), (-0.25, -0.25));
-        assert_eq!(s.start.len(), SCOPE_COLS);
+        assert_eq!((s.start.len(), s.start_len), (1920, 1920));
         assert!((s.secs - 1.0).abs() < 1e-6);
-        // Shorter than a column each.
+        // Shorter than a bin each.
         let s = scope_of(&[0.1, -0.1], 48_000.0);
-        assert_eq!(s.all.len(), SCOPE_COLS);
+        assert_eq!(s.all.len(), SCOPE_BINS);
+        assert_eq!(s.start, [0.1, -0.1]);
+        // The band is the bins' tops then their bottoms, at least `min` high.
+        let view = RectF::new(0.0, 0.0, 100.0, 42.0);
+        let band = envelope(&view, &[(-0.5, 0.5), (0.0, 0.0)], 0.75);
+        assert_eq!(band, [(25.0, 11.0), (75.0, 21.0), (75.0, 21.75), (25.0, 31.0)]);
     }
 }
