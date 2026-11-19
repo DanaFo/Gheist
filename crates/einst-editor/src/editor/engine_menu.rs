@@ -171,6 +171,10 @@ impl Editor {
             }
             UiEvent::MenuSelected { anchor, index, .. } if self.layer_menu.as_ref().is_some_and(|(a, _)| a == anchor) => {
                 let Some((_, (e, p, l))) = self.layer_menu.take() else { return false };
+                if *index == padmenu::SYNTH_ITEM {
+                    self.open_synth(l);
+                    return true;
+                }
                 padmenu::layer_action(&mut self.model, &mut self.clipboard, e, p, l, *index, &mut self.outbox)
             }
             UiEvent::Mouse { path, overload, kind: dreist_gui::app::MouseKind::RightDown, .. } if overload == "EditorPad" => {
@@ -189,6 +193,9 @@ impl Editor {
                         self.set_learn(false);
                     }
                     self.model.utility_tab = front::BROWSER_PAGE;
+                }
+                if let Some(l) = o.synth {
+                    self.open_synth(l);
                 }
                 if let Some(l) = o.save {
                     let e = self.model.engine;

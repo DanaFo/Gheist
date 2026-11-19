@@ -6,6 +6,7 @@
 //! nodes from `einst_dsp`. [`install`] it before any window, document or
 //! effect is created.
 
+pub mod synth;
 pub mod v1io;
 
 use dreist_formats::profile::{EINST, Profile, Resources};

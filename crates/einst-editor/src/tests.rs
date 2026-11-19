@@ -5010,3 +5010,44 @@ fn the_performance_readout_covers_no_control() {
     assert_eq!(ed.app.abs_rect(&list).h, h + dreist_gui::perf::STRIP);
     assert!(ed.app.root.children.iter().all(|c| c.name != dreist_gui::perf::NAME));
 }
+
+/// The synth panel from the layer menu: a knob drag renders the patch onto
+/// the layer (stored with it) and auditions it; a sample loaded on the
+/// layer replaces the patch.
+#[test]
+fn synth_panel_renders_onto_the_layer() {
+    crate::app::test_setup();
+    use dreist_gui::app::MouseKind;
+    let Ok(mut ed) = Editor::new(dreist_gui::skin::default_theme(), Model::new(project::new_document())) else { return };
+    let e = ed.model.engine;
+    let pad = ed.model.pad[e];
+    ed.open_synth(2);
+    ed.sync();
+    assert_eq!(ed.synth.open, Some((e, pad, 2)));
+    let panel = ed.synth.panel_path().unwrap();
+    assert!(ed.app.ctrl(&panel[..panel.len() - 1]).is_some_and(|o| o.visible), "the overlay shows");
+    // Drag the cutoff knob (third row, first cell) down.
+    let (x, y) = (10.0 + 8.0 + 28.0, 28.0 + 6.0 + 2.0 * 100.0 + 16.0 + 30.0);
+    let ev = |kind, y: f32| UiEvent::Mouse { path: panel.clone(), overload: crate::synth::OVERLOAD.into(), kind, x, y };
+    ed.take_commands();
+    ed.handle(&ev(MouseKind::Down, y));
+    ed.handle(&ev(MouseKind::Drag, y + 40.0));
+    ed.handle(&ev(MouseKind::Up, y + 40.0));
+    let cmds = ed.take_commands();
+    assert!(cmds.iter().any(|c| matches!(c, Command::Preview(Some(_)))), "the render auditions");
+    let layer = ed.model.layer_node(e, pad, 2).expect("the layer");
+    let patch = einst::synth::patch_of(layer).expect("the patch is stored");
+    assert!((patch.get(einst_dsp::synth::P::Cutoff) - (0.7 - 0.2)).abs() < 1e-4);
+    let file = std::path::PathBuf::from(layer.attr("AudioFileName").unwrap());
+    assert!(file.is_file() && file.file_name().unwrap().to_string_lossy().starts_with("synth-"));
+    assert!(ed.model.layer(e, pad, 2).valid);
+    // Outside the panel closes it.
+    let overlay = panel[..panel.len() - 1].to_vec();
+    ed.handle(&UiEvent::Mouse { path: overlay, overload: "ModalOverlay".into(), kind: MouseKind::Down, x: 1.0, y: 1.0 });
+    assert_eq!(ed.synth.open, None);
+    // A sample on the layer drops the patch.
+    let dir = preview_files("synth-replace");
+    let wav = std::fs::read_dir(&dir).unwrap().flatten().map(|f| f.path()).find(|p| p.extension().is_some_and(|x| x == "wav")).unwrap();
+    assert!(crate::browser::load_sample_into_layer(&mut ed.model, e, pad, 2, &wav));
+    assert!(einst::synth::patch_of(ed.model.layer_node(e, pad, 2).unwrap()).is_none());
+}

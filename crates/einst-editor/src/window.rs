@@ -154,6 +154,20 @@ pub fn native_dialogs() -> crate::DialogFn {
             let desktop = dreist_formats::paths::home().join("Desktop");
             rfd::FileDialog::new().set_title("Please choose a location to export to").set_directory(start_dir(desktop)).pick_folder()
         }
+        crate::Dialog::OpenSynthPreset => {
+            let dir = crate::synth::presets_dir();
+            rfd::FileDialog::new().set_title("Please choose the synth preset to load").add_filter("Synth presets", &[crate::synth::PRESET_EXT]).set_directory(start_dir(dir)).pick_file()
+        }
+        crate::Dialog::SaveSynthPreset => {
+            let dir = crate::synth::presets_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            rfd::FileDialog::new()
+                .set_title("Please select the location to save to")
+                .add_filter("Synth presets", &[crate::synth::PRESET_EXT])
+                .set_file_name(format!("New Synth.{}", crate::synth::PRESET_EXT))
+                .set_directory(start_dir(dir))
+                .save_file()
+        }
         crate::Dialog::ChooseDocuments(start) => rfd::FileDialog::new().set_title(crate::modal::docs_browse_title()).set_directory(start_dir(start)).pick_folder(),
         crate::Dialog::LocateFile { title, start } => {
             let d = rfd::FileDialog::new().set_title(title).add_filter("Audio", &["wav", "aif", "aiff"]);

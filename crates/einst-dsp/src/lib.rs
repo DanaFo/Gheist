@@ -36,6 +36,7 @@ pub mod phaser;
 pub mod ring_mod;
 pub mod ssl_eq;
 pub mod ssl_filter;
+pub mod synth;
 pub mod tin_can;
 pub mod urei1176;
 pub mod vari_eq;

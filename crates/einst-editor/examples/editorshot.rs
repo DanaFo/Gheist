@@ -5,11 +5,13 @@
 //! `DREIST_CLICK=Ctrl/Name` clicks a control, e.g. `Header/OptionsButton`;
 //! `DREIST_RIGHT=1` right-clicks it instead, `DREIST_MENU=a|b` then picks the
 //! open menu's items ending in a, then b (`#3` picks index 3),
-//! `DREIST_HOVER=1` leaves the pointer there and shows its tooltip).
+//! `DREIST_HOVER=1` leaves the pointer there and shows its tooltip;
+//! `DREIST_SYNTH=1` opens the synth panel on the selected pad's first layer).
 
 use einst_editor::{Editor, Model};
 
 fn main() {
+    einst::install();
     let args: Vec<String> = std::env::args().collect();
     let doc = args.get(1).filter(|s| !s.is_empty()).map(|p| dreist_formats::Project::load(std::path::Path::new(p)).expect("project").raw).unwrap_or_else(|| dreist_formats::Node::new("root", None));
     let out = args.get(2).map(String::as_str).unwrap_or("editor.png");
@@ -71,6 +73,10 @@ fn main() {
             let i = pick.strip_prefix('#').and_then(|n| n.parse().ok()).or_else(|| m.items.iter().position(|s| s.ends_with(pick))).unwrap_or_else(|| panic!("{pick} in {:?}", m.items));
             ed.handle(&dreist_gui::app::UiEvent::MenuSelected { anchor: m.anchor.clone(), name: String::new(), index: i });
         }
+    }
+    if std::env::var("DREIST_SYNTH").is_ok() {
+        ed.open_synth(0);
+        ed.sync();
     }
     if let Ok(f) = std::env::var("DREIST_SLICE") {
         ed.open_slicer(std::path::Path::new(&f));

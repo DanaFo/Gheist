@@ -8,33 +8,41 @@ use std::path::Path;
 use dreist_formats::Node;
 
 /// The document element of `path`, converted when it is a v1 file.
+/// Synth layers whose render is missing render again
+/// ([`crate::synth::restore`]).
 pub fn read_document(path: &Path) -> Option<Node> {
-    match einst_formats::v1::convert_file(path) {
+    let mut doc = match einst_formats::v1::convert_file(path) {
         Ok(Some(doc)) => Some(doc),
         Ok(None) => Node::parse(&std::fs::read_to_string(path).ok()?).ok(),
         Err(_) => None,
-    }
+    }?;
+    crate::synth::restore(&mut doc, Some(&dreist_formats::model::samples_dir(path)));
+    Some(doc)
 }
 
 /// A project to open: a v1 file converted and placed in a project
 /// (single-object files in engine 0), else the stored project.
 pub fn read_project(path: &Path) -> Option<(Node, bool)> {
-    match einst_formats::v1::open_as_project(path) {
+    let (mut doc, converted) = match einst_formats::v1::open_as_project(path) {
         Ok(Some((doc, _))) => Some((doc, true)),
         Ok(None) => dreist_formats::Project::load(path).ok().map(|p| (p.raw, false)),
         Err(_) => None,
-    }
+    }?;
+    crate::synth::restore(&mut doc, Some(&dreist_formats::model::samples_dir(path)));
+    Some((doc, converted))
 }
 
 /// The document of a host session: v1's plugin state (a v1 project text,
 /// possibly in a program / bank / preset container; `einst_formats::chunk`)
 /// converted, anything else parsed as is.
 pub fn session_document(state: &str) -> Option<Node> {
-    match einst_formats::chunk::convert(state.as_bytes()) {
+    let mut doc = match einst_formats::chunk::convert(state.as_bytes()) {
         Ok(Some(doc)) => Some(doc),
         Ok(None) => Node::parse(state).ok(),
         Err(_) => None,
-    }
+    }?;
+    crate::synth::restore(&mut doc, None);
+    Some(doc)
 }
 
 #[cfg(test)]

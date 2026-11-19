@@ -76,6 +76,8 @@ pub enum PadAction {
     Reveal(usize),
     SaveMenu,
     SaveSample(usize),
+    SynthMenu,
+    Synth(usize),
     None,
 }
 
@@ -88,6 +90,8 @@ pub struct Outcome {
     /// Save a copy of this sample (Save layer sample...).
     /// Layer to save ("Save layer sample...").
     pub save: Option<usize>,
+    /// Layer to open the synth panel on ("Synth on layer ▸").
+    pub synth: Option<usize>,
 }
 
 /// The editor clipboard (`Clipboard`: pad, track, pattern).
@@ -142,7 +146,7 @@ pub(crate) fn reset_pad(pad: &mut Node) {
 
 fn clear_layer(l: &mut Node) {
     l.attrs.retain(|(k, _)| k != "AudioFileName");
-    l.children.retain(|c| c.class != "AudioFileMarkers" && c.name.as_deref() != Some("LayerName"));
+    l.children.retain(|c| c.class != "AudioFileMarkers" && c.name.as_deref() != Some("LayerName") && c.class != einst::synth::PATCH);
 }
 
 /// Put `node` at pad `p` (renamed), keeping the target's lock state.
@@ -302,6 +306,8 @@ impl PadMenu {
             ("Open parent folder in browser ▸".into(), PadAction::ParentMenu, has_samples),
             ("Reveal in Finder ▸".into(), PadAction::RevealMenu, has_samples),
             ("Save layer sample ▸".into(), PadAction::SaveMenu, has_samples),
+            sep(),
+            ("Synth on layer ▸".into(), PadAction::SynthMenu, !locked),
         ];
         self.show(app, anchor, p, items);
     }
@@ -330,7 +336,7 @@ impl PadMenu {
             (0..PADS).map(|q| (format!("Pad {}", q + 1), f(q), q != p && !(skip_locked && pad_locked(model, e, q)))).collect()
         };
         let sample = |model: &Model, l: usize| model.layer_sample(e, p, l).or_else(|| model.layer_node(e, p, l).and_then(|n| n.attr("AudioFileName")).map(|f| PathBuf::from(f.replace('\\', "/"))));
-        let done = Outcome { changed: true, browse: None, save: None };
+        let done = Outcome { changed: true, ..Outcome::default() };
         // Lock and colour go through the pad message handler, which applies them
         // to every selected pad.
         let targets: Vec<usize> = {
@@ -339,6 +345,25 @@ impl PadMenu {
         };
         match a {
             PadAction::None => Outcome::default(),
+            PadAction::SynthMenu => {
+                let items = (0..LAYERS)
+                    .map(|l| {
+                        let n = model.layer_node(e, p, l);
+                        let what = if n.is_some_and(|n| einst::synth::patch_of(n).is_some()) {
+                            "synth".to_string()
+                        } else if model.layer(e, p, l).valid {
+                            sample(model, l).and_then(|f| f.file_name().map(|s| s.to_string_lossy().into_owned())).unwrap_or_default()
+                        } else {
+                            "empty".to_string()
+                        };
+                        let locked = n.is_some_and(|n| n.locked());
+                        (format!("Layer {} ({what})", l + 1), PadAction::Synth(l), !locked)
+                    })
+                    .collect();
+                self.show(app, anchor, p, items);
+                Outcome::default()
+            }
+            PadAction::Synth(l) => Outcome { synth: Some(l), ..Outcome::default() },
             PadAction::ClearLayerMenu => {
                 let items = layer_items(model, &PadAction::ClearLayer, true);
                 self.show(app, anchor, p, items);
@@ -471,8 +496,8 @@ impl PadMenu {
                 }
                 Outcome::default()
             }
-            PadAction::OpenParent(l) => Outcome { changed: true, browse: sample(model, l).and_then(|f| f.parent().map(PathBuf::from)), save: None },
-            PadAction::SaveSample(l) => Outcome { changed: false, browse: None, save: sample(model, l).map(|_| l) },
+            PadAction::OpenParent(l) => Outcome { changed: true, browse: sample(model, l).and_then(|f| f.parent().map(PathBuf::from)), ..Outcome::default() },
+            PadAction::SaveSample(l) => Outcome { save: sample(model, l).map(|_| l), ..Outcome::default() },
             PadAction::Reveal(l) => {
                 if let Some(f) = sample(model, l) {
                     dreist_host::shell::reveal(&[f]);
@@ -485,8 +510,12 @@ impl PadMenu {
 
 /// The Pad / Layers selector's layer rows: the original v1's menu
 /// ([re:529567]): Cut, Copy, Paste, Select all layers, Clear layer,
-/// Reset layer, Reset envelopes, Tune loop to tempo.
-pub const LAYER_ITEMS: [&str; 11] = ["Cut", "Copy", "Paste", "", "Select all layers", "", "Clear layer", "Reset layer", "Reset envelopes", "", "Tune loop to tempo"];
+/// Reset layer, Reset envelopes, Tune loop to tempo; then Einst's Synth...
+/// ([`SYNTH_ITEM`]).
+pub const LAYER_ITEMS: [&str; 13] = ["Cut", "Copy", "Paste", "", "Select all layers", "", "Clear layer", "Reset layer", "Reset envelopes", "", "Tune loop to tempo", "", "Synth..."];
+
+/// The layer menu's Synth... item: opens the synth panel on the layer.
+pub const SYNTH_ITEM: usize = 12;
 
 /// The selector's pad item: the original v1's menu ([re:17e95f]).
 pub const PAD_ROW_ITEMS: [&str; 8] = ["Cut", "Copy", "Paste", "", "Select all layers", "", "Reset all layers", "Reset all layers' envelopes"];
@@ -509,6 +538,7 @@ pub fn layer_items(model: &Model, clip: &Clipboard, e: usize, p: usize, l: usize
             1 => item(t, valid),
             2 => item(t, clip.layer.is_some() && !locked),
             6..=8 | 10 => item(t, !locked && valid),
+            SYNTH_ITEM => item(t, !locked),
             _ => t.to_string(),
         })
         .collect()

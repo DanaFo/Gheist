@@ -50,6 +50,7 @@ mod search;
 mod slicer;
 mod song;
 mod swing;
+pub mod synth;
 mod tabs;
 mod timeline;
 mod tooltips;
@@ -116,6 +117,10 @@ pub enum Dialog {
     /// Preferences › Browse: the new documents folder, starting at the
     /// current one.
     ChooseDocuments(std::path::PathBuf),
+    /// Synth panel › Load › Browse...: a synth preset.
+    OpenSynthPreset,
+    /// Synth panel › Save: where to write the synth preset.
+    SaveSynthPreset,
 }
 
 /// The product name shown in the UI (the installed profile's).
@@ -242,6 +247,7 @@ pub struct Editor {
     pub devices: devices::Devices,
     midiconsole: midiconsole::MidiConsole,
     trigger: trigger::TriggerPanel,
+    synth: synth::SynthPanel,
     metadata: metadata::MetaData,
     retro: retro::PatternRetro,
     convertor: convertor::Convertor,
@@ -344,6 +350,7 @@ impl Editor {
         let trigger = trigger::TriggerPanel::build(&mut skin, &mut root)?;
         let metadata = metadata::MetaData::build(&mut skin, &mut root)?;
         let convertor = convertor::Convertor::build(&mut skin, &mut root)?;
+        let synth = synth::SynthPanel::build(&mut root);
         let mut ed = Editor {
             menu_bar: false,
             closing: false,
@@ -394,6 +401,7 @@ impl Editor {
             devices,
             midiconsole,
             trigger,
+            synth,
             metadata,
             retro: retro::PatternRetro::default(),
             convertor,

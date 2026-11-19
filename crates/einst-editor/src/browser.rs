@@ -904,7 +904,8 @@ pub fn load_sample_into_layer(model: &mut Model, e: usize, p: usize, l: usize, f
     if reset {
         *layer = Node::new("Layer", Some(&format!("Layer{l}")));
     }
-    layer.children.retain(|c| c.class != "AudioFileMarkers");
+    // A sample replaces a synth layer's patch.
+    layer.children.retain(|c| c.class != "AudioFileMarkers" && c.class != einst::synth::PATCH);
     layer.set("AudioFileName", file.to_string_lossy());
     layer.child_mut_or_insert("FixedString", "LayerName").set("string", &stem);
     if let Some((frames, sr)) = dreist_engine::audio::info(file) {

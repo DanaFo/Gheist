@@ -24,11 +24,21 @@ use nih_plug::prelude::*;
 
 /// A project file: a the original v1 document (any of `.geist`, `.geistkit`,
 /// `.geistpad`, `.geistengine`, `.geistpattern`, `.geistbank`) converted by
-/// `einst_formats`, anything else through Dreist's loader.
+/// `einst_formats`, anything else through Dreist's loader. Synth layers
+/// whose render is missing render again (`einst::synth::restore`).
 pub fn load_project(p: &std::path::Path, sr: f32, options: dreist_engine::RenderOptions, cache: &mut dreist_engine::audio::SampleCache) -> Result<Dreist, String> {
     match einst_formats::v1::open_as_project(p) {
         Ok(Some((doc, samples))) => Dreist::from_document(&doc, &samples, sr, options, cache).ok_or_else(|| "the converted v1 document did not build".into()),
-        Ok(None) => Dreist::load_cached(p, sr, options, cache).map_err(|e| e.to_string()),
+        Ok(None) => {
+            // Synth layers whose render is missing render again first.
+            let samples = dreist_formats::model::samples_dir(p);
+            if let Some(mut doc) = dreist_formats::Project::load(p).ok().map(|p| p.raw) {
+                if einst::synth::restore(&mut doc, Some(&samples)) > 0 {
+                    return Dreist::from_document(&doc, &samples, sr, options, cache).ok_or_else(|| "the project did not build".into());
+                }
+            }
+            Dreist::load_cached(p, sr, options, cache).map_err(|e| e.to_string())
+        }
         Err(e) => Err(e.to_string()),
     }
 }

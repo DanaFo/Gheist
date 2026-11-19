@@ -21,6 +21,7 @@ struct Drawer<'a> {
     mixers: &'a [mixer::Mixer],
     modals: &'a modal::Modals,
     learn: &'a learn::Learn,
+    synth: &'a crate::synth::SynthPanel,
 }
 
 /// The [`Drawer`] of an editor's panels (a macro: the editor's app stays
@@ -44,6 +45,7 @@ macro_rules! drawer {
             mixers: &$ed.mixers,
             modals: &$ed.modals,
             learn: &$ed.learn,
+            synth: &$ed.synth,
         }
     };
 }
@@ -64,6 +66,7 @@ impl dreist_gui::render::CustomDraw for Drawer<'_> {
             || self.mixers.iter().any(|m| m.draw(r, p, c))
             || self.midiconsole.draw(r, p, c)
             || self.modals.draw(r, p, c)
+            || self.synth.draw(self.model, r, p, c)
             || (c.overload == "LearnOverlay" && draw_learn(self.learn, r, p))
             || mixer::draw_short_label(r, p, c)
     }
@@ -198,7 +201,11 @@ impl Editor {
         let mc_hit = self.midiconsole.handle(&self.app, ev)
             || self.trigger.handle(&mut self.app, ev, &mut self.outbox)
             || self.metadata.handle(&mut self.app, &self.model, ev, &mut self.outbox)
-            || self.convertor.handle(&mut self.app, &mut self.model, ev, &mut self.outbox);
+            || self.convertor.handle(&mut self.app, &mut self.model, ev, &mut self.outbox)
+            || self.synth.handle(&mut self.app, &mut self.model, ev, &mut self.outbox);
+        if let Some(r) = self.synth.request.take() {
+            self.synth_request(r);
+        }
         let dev_hit = self.devices.handle(&mut self.app, ev);
         if std::mem::take(&mut self.devices.restart_requested) {
             if let Some(h) = &self.devices.host {
@@ -350,6 +357,29 @@ impl Editor {
         changed
     }
 
+    /// The synth panel's file dialogs.
+    fn synth_request(&mut self, r: crate::synth::Request) {
+        match r {
+            crate::synth::Request::SavePreset => {
+                if let Some(p) = self.dialog(Dialog::SaveSynthPreset) {
+                    self.synth.save(&p);
+                }
+            }
+            crate::synth::Request::OpenPreset => {
+                if let Some(p) = self.dialog(Dialog::OpenSynthPreset) {
+                    self.synth.load(&mut self.model, &p, &mut self.outbox);
+                }
+            }
+        }
+    }
+
+    /// Opens the synth panel on layer `l` of the selected pad.
+    pub fn open_synth(&mut self, l: usize) {
+        let e = self.model.engine;
+        let p = self.model.pad[e];
+        self.synth.show(&mut self.app, &self.model, e, p, l);
+    }
+
     /// Bring every control in line with the model.
     pub fn sync(&mut self) {
         // Only the controls whose state the panels change are repainted.
@@ -365,6 +395,7 @@ impl Editor {
         self.trigger.sync(&mut self.app, &self.model);
         self.metadata.sync(&mut self.app);
         self.convertor.sync(&mut self.app);
+        self.synth.sync(&mut self.app);
         self.header.sync(&mut self.app, &self.model, self.learn.active);
         self.front.sync(&mut self.app, &self.model);
         if self.sampler.sync(&mut self.app, &self.model) {
