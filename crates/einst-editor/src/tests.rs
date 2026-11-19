@@ -5067,6 +5067,45 @@ fn the_pad_menu_opens_the_synth_panel_at_once() {
     assert!(ed.app.ctrl(&panel[..panel.len() - 1]).is_some_and(|o| o.visible), "the overlay shows");
 }
 
+/// A drag from the synth panel's scope out of the window gives the OS the
+/// render, named for the preset; a knob's drag gives nothing.
+#[test]
+fn the_synth_scope_drags_out_its_render() {
+    crate::app::test_setup();
+    use dreist_gui::app::MouseKind;
+    let Ok(mut ed) = Editor::new(dreist_gui::skin::default_theme(), Model::new(project::new_document())) else { return };
+    ed.open_synth(1);
+    ed.sync();
+    let panel = ed.synth.panel_path().unwrap();
+    let down = |x: f32, y: f32| UiEvent::Mouse { path: panel.clone(), overload: crate::synth::OVERLOAD.into(), kind: MouseKind::Down, x, y };
+    let up = UiEvent::Mouse { path: panel.clone(), overload: crate::synth::OVERLOAD.into(), kind: MouseKind::Up, x: 0.0, y: 0.0 };
+    // No render yet: nothing to drag.
+    let (sx, sy) = crate::synth::scope_centre();
+    ed.handle(&down(sx, sy));
+    ed.handle(&UiEvent::DragOut { from: panel.clone() });
+    assert!(ed.app.drag_out.is_none());
+    ed.handle(&up);
+    // Kick from the preset list renders onto the layer.
+    let (kx, ky) = crate::synth::preset_row_centre(1);
+    ed.handle(&down(kx, ky));
+    ed.handle(&up);
+    let render = std::path::PathBuf::from(ed.model.layer_node(ed.model.engine, ed.model.pad[ed.model.engine], 1).unwrap().attr("AudioFileName").unwrap());
+    // A knob's drag out of the window gives nothing.
+    let (cx, cy) = crate::synth::knob_centre(einst_dsp::synth::P::Cutoff);
+    ed.handle(&down(cx, cy));
+    ed.handle(&UiEvent::DragOut { from: panel.clone() });
+    assert!(ed.app.drag_out.is_none());
+    ed.handle(&up);
+    // The scope's does.
+    ed.handle(&down(sx, sy));
+    ed.handle(&UiEvent::DragOut { from: panel.clone() });
+    let files = ed.app.drag_out.take().expect("the render for the OS drag");
+    assert_eq!(files.len(), 1);
+    let name = files[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(name.starts_with("Kick ") && name.ends_with(".wav"), "{name}");
+    assert_eq!(std::fs::read(&files[0]).unwrap(), std::fs::read(&render).unwrap());
+}
+
 /// The synth panel repaints as its knobs move, also when it opened after
 /// the window's first frame (nothing behind it changes).
 #[test]

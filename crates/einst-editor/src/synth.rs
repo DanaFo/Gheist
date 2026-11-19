@@ -13,7 +13,9 @@
 //! - The preset list holds the factory presets and the `.einstsynth` files
 //!   in the documents folder's `Synth Presets`; a click (or < and >) loads
 //!   one. Load picks any file, Save asks where.
-//! - The scope shows the render: all of it, and its first 40 ms.
+//! - The scope shows the render: all of it, and its first 40 ms. Dragged
+//!   out of the window, it drops the render into the DAW (or the desktop)
+//!   as a WAV named for the preset.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -313,6 +315,20 @@ pub(crate) fn knob_centre(p: P) -> (f32, f32) {
     (k.x + k.w / 2.0, k.y + k.h / 2.0)
 }
 
+/// The scope's centre (tests).
+#[cfg(test)]
+pub(crate) fn scope_centre() -> (f32, f32) {
+    let s = scope_rect();
+    (s.x + s.w / 2.0, s.y + s.h / 2.0)
+}
+
+/// The centre of the preset list's row `i` (tests; the list unscrolled).
+#[cfg(test)]
+pub(crate) fn preset_row_centre(i: usize) -> (f32, f32) {
+    let l = list_rect();
+    (l.x + l.w / 2.0, l.y + (i as f32 + 0.5) * ITEM_H)
+}
+
 fn box_rect(r: &RectF) -> RectF {
     RectF::new(r.x + 4.0, r.y + 24.0, r.w - 8.0, 22.0)
 }
@@ -516,6 +532,9 @@ pub struct SynthPanel {
     random_off: [bool; COUNT],
     amount: f32,
     seed: u64,
+    /// The press was on the scope (a drag out of the window takes the
+    /// render).
+    scope_press: bool,
 }
 
 /// The renders folder: `Synth Renders` in the settings folder (as
@@ -616,6 +635,7 @@ impl SynthPanel {
             random_off,
             amount: (o.int(OPT_RANDOM_AMOUNT, 50).clamp(0, 100) as f32) / 100.0,
             seed,
+            scope_press: false,
         }
     }
 
@@ -802,6 +822,22 @@ impl SynthPanel {
         self.reveal();
     }
 
+    /// The file a drag out of the scope gives: the render, copied once to
+    /// `<preset> <hash>.wav` in the renders folder's `Dragged` (kept, so a
+    /// DAW's clip of it stays; the same patch gives the same file).
+    fn drag_file(&self) -> std::io::Result<PathBuf> {
+        let src = self.render.as_deref().ok_or_else(|| std::io::Error::other("no render"))?;
+        let dir = src.parent().unwrap_or(Path::new(".")).join("Dragged");
+        let name = self.current.and_then(|i| self.items.get(i)).map_or("Synth", |it| it.name.as_str());
+        let name: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '_' } else { c }).collect();
+        let path = dir.join(format!("{name} {:06x}.wav", self.patch.hash() & 0xff_ffff));
+        if !path.is_file() {
+            std::fs::create_dir_all(&dir)?;
+            std::fs::copy(src, &path)?;
+        }
+        Ok(path)
+    }
+
     fn rand(&mut self) -> f32 {
         // xorshift64*
         self.seed ^= self.seed >> 12;
@@ -849,6 +885,11 @@ impl SynthPanel {
                 }
                 return;
             }
+        }
+        self.scope_press = false;
+        if contains(&scope_rect(), x, y) {
+            self.scope_press = self.render.is_some();
+            return;
         }
         let list = list_rect();
         if contains(&list, x, y) {
@@ -978,6 +1019,7 @@ impl SynthPanel {
                     },
                     MouseKind::Up => {
                         self.pressed = None;
+                        self.scope_press = false;
                         let drag = self.drag.take();
                         if std::mem::take(&mut self.dragged) {
                             match drag {
@@ -1047,6 +1089,15 @@ impl SynthPanel {
                     if self.set(p, *index as f32) {
                         self.commit(model, out);
                         self.current = self.matching();
+                    }
+                }
+                true
+            }
+            UiEvent::DragOut { from } if self.panel_path().as_deref() == Some(from.as_slice()) => {
+                if std::mem::take(&mut self.scope_press) {
+                    match self.drag_file() {
+                        Ok(f) => app.drag_out = Some(vec![f]),
+                        Err(e) => self.status = format!("Drag failed: {e}"),
                     }
                 }
                 true
@@ -1214,6 +1265,9 @@ impl SynthPanel {
             p.text(RectF::new(s.x + PAD, s.y + 2.0, s.w - 2.0 * PAD, 14.0), &len, DIM, font, HAlign::Right, VAlign::Center);
         }
         p.text(RectF::new(start.x, start.y - 17.0, start.w, 16.0), &format!("First {:.0} ms", ZOOM * 1000.0), DIM, font, HAlign::Left, VAlign::Center);
+        if self.scope.is_some() {
+            p.text(RectF::new(start.x, start.y - 17.0, start.w, 16.0), "Drag out to place it", DIM, font, HAlign::Right, VAlign::Center);
+        }
         for view in [all, start] {
             p.fill_rect(view, WELL);
             let mid = view.y + view.h / 2.0;
