@@ -5106,6 +5106,94 @@ fn the_synth_scope_drags_out_its_render() {
     assert_eq!(std::fs::read(&files[0]).unwrap(), std::fs::read(&render).unwrap());
 }
 
+/// The synth panel's preset list: New saves the patch and names it in an
+/// edit box, Save writes over it, Delete asks and removes it; factory
+/// presets cannot be renamed or deleted.
+#[test]
+fn the_synth_preset_list_saves_renames_and_deletes() {
+    crate::app::test_setup();
+    use crate::synth::Button;
+    use dreist_gui::app::MouseKind;
+    let docs = std::env::temp_dir().join(format!("einst-synth-docs-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&docs);
+    let mut o = crate::options::Options::load();
+    o.set("LocalDocumentsPath", docs.to_string_lossy());
+    o.save();
+    let Ok(mut ed) = Editor::new(dreist_gui::skin::default_theme(), Model::new(project::new_document())) else { return };
+    ed.open_synth(0);
+    ed.sync();
+    let panel = ed.synth.panel_path().unwrap();
+    let click = |ed: &mut Editor, (x, y): (f32, f32)| {
+        for kind in [MouseKind::Down, MouseKind::Up] {
+            ed.handle(&UiEvent::Mouse { path: panel.clone(), overload: crate::synth::OVERLOAD.into(), kind, x, y });
+        }
+    };
+    let dir = crate::synth::presets_dir();
+    // New: saved, then named.
+    click(&mut ed, crate::synth::header_button_centre(Button::PresetNew));
+    assert!(dir.join("New Synth.einstsynth").is_file());
+    assert!(ed.app.is_editing(), "the name is edited");
+    for _ in 0.."New Synth".len() {
+        ed.app.key_named("Backspace");
+    }
+    ed.app.key_text("Big Kick");
+    let (evs, _) = ed.app.key_named("Enter");
+    for ev in &evs {
+        ed.handle(ev);
+    }
+    assert!(dir.join("Big Kick.einstsynth").is_file() && !dir.join("New Synth.einstsynth").exists());
+    assert!(ed.app.root.path_of(crate::synth::PRESET_EDIT).is_none(), "the edit box goes");
+    // Save writes the changed patch over it.
+    let (x, y) = crate::synth::knob_centre(einst_dsp::synth::P::Cutoff);
+    for (kind, y) in [(MouseKind::Down, y), (MouseKind::Drag, y + 40.0), (MouseKind::Up, y + 40.0)] {
+        ed.handle(&UiEvent::Mouse { path: panel.clone(), overload: crate::synth::OVERLOAD.into(), kind, x, y });
+    }
+    click(&mut ed, crate::synth::header_button_centre(Button::PresetSave));
+    let saved = crate::synth::load_preset(&dir.join("Big Kick.einstsynth")).unwrap();
+    assert!((saved.get(einst_dsp::synth::P::Cutoff) - 0.5).abs() < 1e-4);
+    // Delete asks first.
+    click(&mut ed, crate::synth::header_button_centre(Button::PresetDelete));
+    let menu = ed.app.menu.as_ref().expect("the delete question");
+    assert_eq!(menu.items[0], "Delete Big Kick");
+    ed.handle(&UiEvent::MenuSelected { anchor: panel.clone(), name: String::new(), index: 0 });
+    assert!(!dir.join("Big Kick.einstsynth").exists());
+    // A factory preset: Rename does nothing, New copies it.
+    click(&mut ed, crate::synth::preset_row_centre(1));
+    click(&mut ed, crate::synth::header_button_centre(Button::PresetRename));
+    assert!(!ed.app.is_editing());
+    click(&mut ed, crate::synth::header_button_centre(Button::PresetSave));
+    assert_eq!(crate::synth::load_preset(&dir.join("New Synth.einstsynth")), Some(crate::synth::factory_patch(1)));
+    let _ = std::fs::remove_dir_all(&docs);
+}
+
+/// Turning a knob with Audition on plays the sound as it goes, without
+/// touching the layer until the release.
+#[test]
+fn a_turning_synth_knob_plays_as_it_goes() {
+    crate::app::test_setup();
+    use dreist_gui::app::MouseKind;
+    let Ok(mut ed) = Editor::new(dreist_gui::skin::default_theme(), Model::new(project::new_document())) else { return };
+    let (e, pad) = (ed.model.engine, ed.model.pad[ed.model.engine]);
+    ed.open_synth(3);
+    ed.sync();
+    assert!(ed.synth.audition);
+    let panel = ed.synth.panel_path().unwrap();
+    let (x, y) = crate::synth::knob_centre(einst_dsp::synth::P::Cutoff);
+    let ev = |kind, y: f32| UiEvent::Mouse { path: panel.clone(), overload: crate::synth::OVERLOAD.into(), kind, x, y };
+    ed.handle(&ev(MouseKind::Down, y));
+    ed.handle(&ev(MouseKind::Drag, y + 20.0));
+    let started = std::time::Instant::now();
+    let mut heard = false;
+    while !heard && started.elapsed() < std::time::Duration::from_secs(5) {
+        heard = ed.take_commands().iter().any(|c| matches!(c, Command::Preview(Some(_))));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    assert!(heard, "the turn plays");
+    assert!(ed.model.layer_node(e, pad, 3).is_none_or(|n| einst::synth::patch_of(n).is_none()), "the layer waits for the release");
+    ed.handle(&ev(MouseKind::Up, y + 20.0));
+    assert!(einst::synth::patch_of(ed.model.layer_node(e, pad, 3).unwrap()).is_some());
+}
+
 /// The synth panel repaints as its knobs move, also when it opened after
 /// the window's first frame (nothing behind it changes).
 #[test]

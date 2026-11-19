@@ -3,8 +3,9 @@
 //! a layer row's menu (Synth...).
 //!
 //! - Knobs drag up and down (the wheel steps them); a double click resets
-//!   one. Each change renders on release and, with Audition on, plays the
-//!   render.
+//!   one. With Audition on, a turning knob plays the sound as it goes
+//!   (rendered in the background); on release the patch renders to the
+//!   layer's WAV and plays.
 //! - Wave and LFO shape boxes open a menu; toggles switch on a click, and
 //!   each LFO target has its own Uni / Bi switch.
 //! - The dot under a control includes it in Randomize, which moves the
@@ -12,7 +13,10 @@
 //!   dots at random.
 //! - The preset list holds the factory presets and the `.einstsynth` files
 //!   in the documents folder's `Synth Presets`; a click (or < and >) loads
-//!   one. Load picks any file, Save asks where.
+//!   one. New saves the patch as a new preset to name, Save over the
+//!   selected one (a factory one: as a new one); Rename (or a double click)
+//!   and Delete act on the selected user preset. Import and Export pick
+//!   any file.
 //! - The scope shows the render: all of it, and its first 40 ms. Dragged
 //!   out of the window, it drops the render into the DAW (or the desktop)
 //!   as a WAV named for the preset.
@@ -175,6 +179,10 @@ pub enum Button {
     ResetDots,
     Prev,
     Next,
+    PresetNew,
+    PresetSave,
+    PresetRename,
+    PresetDelete,
 }
 
 impl Button {
@@ -183,14 +191,18 @@ impl Button {
             Button::Audition => "Audition",
             Button::Play => "Play",
             Button::Init => "Init",
-            Button::Load => "Load",
-            Button::Save => "Save",
+            Button::Load => "Import",
+            Button::Save => "Export",
             Button::Close => "Close",
             Button::Randomize => "Randomize",
             Button::Dice => "Dice dots",
             Button::ResetDots => "Reset dots",
             Button::Prev => "<",
             Button::Next => ">",
+            Button::PresetNew => "New",
+            Button::PresetSave => "Save",
+            Button::PresetRename => "Rename",
+            Button::PresetDelete => "Delete",
         }
     }
 }
@@ -315,6 +327,13 @@ pub(crate) fn knob_centre(p: P) -> (f32, f32) {
     (k.x + k.w / 2.0, k.y + k.h / 2.0)
 }
 
+/// The centre of header button `b` (tests).
+#[cfg(test)]
+pub(crate) fn header_button_centre(b: Button) -> (f32, f32) {
+    let (_, r) = header_buttons().into_iter().find(|(k, _)| *k == b).expect("a header button");
+    (r.x + r.w / 2.0, r.y + r.h / 2.0)
+}
+
 /// The scope's centre (tests).
 #[cfg(test)]
 pub(crate) fn scope_centre() -> (f32, f32) {
@@ -366,17 +385,112 @@ fn visible_items() -> usize {
     (list_rect().h / ITEM_H) as usize
 }
 
-fn header_button(b: Button) -> RectF {
+/// The preset list's header buttons, left to right.
+fn header_buttons() -> Vec<(Button, RectF)> {
     let s = presets_rect();
-    let x = s.x + s.w - PAD - if b == Button::Prev { 52.0 } else { 24.0 };
-    RectF::new(x, s.y + 2.0, 24.0, 16.0)
+    let buttons = [(Button::PresetNew, 36.0), (Button::PresetSave, 38.0), (Button::PresetRename, 54.0), (Button::PresetDelete, 48.0), (Button::Prev, 22.0), (Button::Next, 22.0)];
+    let mut x = s.x + s.w - PAD - buttons.iter().map(|(_, w)| w + 4.0).sum::<f32>() + 4.0;
+    buttons
+        .into_iter()
+        .map(|(b, w)| {
+            let r = RectF::new(x, s.y + 2.0, w, 16.0);
+            x += w + 4.0;
+            (b, r)
+        })
+        .collect()
 }
+
+/// The edit box naming a preset.
+pub(crate) const PRESET_EDIT: &str = "SynthPresetName";
 
 /// The scope's two views: all of the render and its start.
 fn scope_views() -> (RectF, RectF) {
     let s = scope_rect();
     let h = (s.h - 44.0) / 2.0;
     (RectF::new(s.x + PAD, s.y + 18.0, s.w - 2.0 * PAD, h), RectF::new(s.x + PAD, s.y + 36.0 + h, s.w - 2.0 * PAD, h))
+}
+
+/// The panel's menus.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Menu {
+    Choice(P),
+    /// Delete user preset `i`?
+    Delete(usize),
+}
+
+/// Renders patches off the UI thread for the live preview: one render at
+/// a time, the newest patch waiting, starts at least [`LIVE_GAP`] apart.
+struct Live {
+    jobs: std::sync::mpsc::Sender<(u64, Patch)>,
+    done: std::sync::mpsc::Receiver<(u64, Vec<f32>)>,
+    busy: bool,
+    next: Option<Patch>,
+    last: Option<std::time::Instant>,
+    /// Renders asked for before this are stale.
+    generation: u64,
+}
+
+/// The shortest time between live preview renders (and so retriggers).
+const LIVE_GAP: std::time::Duration = std::time::Duration::from_millis(80);
+
+impl Live {
+    fn new() -> Option<Live> {
+        let (jobs, rx) = std::sync::mpsc::channel::<(u64, Patch)>();
+        let (tx, done) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("synth-preview".into())
+            .spawn(move || {
+                while let Ok(mut job) = rx.recv() {
+                    while let Ok(newer) = rx.try_recv() {
+                        job = newer;
+                    }
+                    if tx.send((job.0, dsp::render(&job.1))).is_err() {
+                        break;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Live { jobs, done, busy: false, next: None, last: None, generation: 0 })
+    }
+
+    fn request(&mut self, patch: &Patch) {
+        self.next = Some(patch.clone());
+        self.pump();
+    }
+
+    fn pump(&mut self) {
+        if self.busy || self.last.is_some_and(|t| t.elapsed() < LIVE_GAP) {
+            return;
+        }
+        if let Some(p) = self.next.take() {
+            self.busy = self.jobs.send((self.generation, p)).is_ok();
+            self.last = Some(std::time::Instant::now());
+        }
+    }
+
+    /// Drops what is waiting and what is rendering.
+    fn cancel(&mut self) {
+        self.next = None;
+        self.generation += 1;
+    }
+
+    /// A finished render still wanted.
+    fn poll(&mut self) -> Option<Vec<f32>> {
+        let mut got = None;
+        while let Ok((g, x)) = self.done.try_recv() {
+            self.busy = false;
+            if g == self.generation {
+                got = Some(x);
+            }
+        }
+        self.pump();
+        got
+    }
+}
+
+/// `name` as a file name: the characters files cannot hold become `_`.
+fn file_safe(name: &str) -> String {
+    name.trim().chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '_' } else { c }).collect()
 }
 
 /// Asks the editor for a file dialog.
@@ -514,8 +628,8 @@ pub struct SynthPanel {
     dragged: bool,
     last_down: (f32, f32),
     pub audition: bool,
-    /// The choice whose menu is open.
-    menu: Option<P>,
+    /// What the open menu is for.
+    menu: Option<Menu>,
     pub request: Option<Request>,
     status: String,
     /// The last render, for Play and the scope.
@@ -535,6 +649,12 @@ pub struct SynthPanel {
     /// The press was on the scope (a drag out of the window takes the
     /// render).
     scope_press: bool,
+    /// The user preset being named in the edit box.
+    renaming: Option<usize>,
+    /// The selected preset's patch as loaded or saved (the patch differs
+    /// once edited: the list marks it).
+    loaded: Option<Patch>,
+    live: Option<Live>,
 }
 
 /// The renders folder: `Synth Renders` in the settings folder (as
@@ -636,12 +756,16 @@ impl SynthPanel {
             amount: (o.int(OPT_RANDOM_AMOUNT, 50).clamp(0, 100) as f32) / 100.0,
             seed,
             scope_press: false,
+            renaming: None,
+            loaded: None,
+            live: None,
         }
     }
 
     /// Opens on layer `l` of pad `p` in engine `e`: its patch, or the
     /// default one (the layer keeps its sample until a change).
     pub fn show(&mut self, app: &mut App, model: &Model, e: usize, p: usize, l: usize) {
+        self.end_rename(app, None);
         let layer = model.layer_node(e, p, l);
         self.patch = layer.and_then(einst::synth::patch_of).unwrap_or_default();
         let render = layer.filter(|n| einst::synth::patch_of(n).is_some()).and_then(|n| n.attr("AudioFileName")).map(PathBuf::from);
@@ -652,6 +776,7 @@ impl SynthPanel {
         self.status.clear();
         self.items = preset_items();
         self.current = self.matching();
+        self.loaded = self.current.map(|_| self.patch.clone());
         self.reveal();
         let (rw, rh) = (app.root.rect.w, app.root.rect.h);
         if let Some(o) = self.overlay.clone().and_then(|p| app.ctrl_mut(&p)) {
@@ -698,6 +823,7 @@ impl SynthPanel {
         self.patch.v.iter().for_each(|v| v.to_bits().hash(&mut h));
         (self.open, self.drag.map(|(d, ..)| format!("{d:?}")), self.audition, self.pressed.map(|b| b as usize), &self.status, &self.render).hash(&mut h);
         (self.items.len(), self.current, self.scroll, self.random_off, self.amount.to_bits()).hash(&mut h);
+        self.loaded.as_ref().map(Patch::hash).hash(&mut h);
         format!("{:016x}", h.finish())
     }
 
@@ -784,6 +910,7 @@ impl SynthPanel {
                 self.patch = p;
                 self.commit(model, out);
                 self.current = Some(i);
+                self.loaded = self.current.map(|_| self.patch.clone());
                 self.reveal();
                 if self.status.is_empty() {
                     self.status = format!("Loaded {}", item.name);
@@ -801,6 +928,7 @@ impl SynthPanel {
                 self.commit(model, out);
                 self.items = preset_items();
                 self.current = self.items.iter().position(|it| it.source == Source::File(path.to_path_buf())).or_else(|| self.matching());
+                self.loaded = self.current.map(|_| self.patch.clone());
                 self.reveal();
                 if self.status.is_empty() {
                     self.status = format!("Loaded {}", stem(path));
@@ -819,6 +947,7 @@ impl SynthPanel {
         };
         self.items = preset_items();
         self.current = self.items.iter().position(|it| it.source == Source::File(path.clone()));
+        self.loaded = self.current.map(|_| self.patch.clone());
         self.reveal();
     }
 
@@ -829,7 +958,7 @@ impl SynthPanel {
         let src = self.render.as_deref().ok_or_else(|| std::io::Error::other("no render"))?;
         let dir = src.parent().unwrap_or(Path::new(".")).join("Dragged");
         let name = self.current.and_then(|i| self.items.get(i)).map_or("Synth", |it| it.name.as_str());
-        let name: String = name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control() { '_' } else { c }).collect();
+        let name = file_safe(name);
         let path = dir.join(format!("{name} {:06x}.wav", self.patch.hash() & 0xff_ffff));
         if !path.is_file() {
             std::fs::create_dir_all(&dir)?;
@@ -870,21 +999,10 @@ impl SynthPanel {
             self.close();
             return;
         }
-        for b in [Button::Prev, Button::Next] {
-            if contains(&header_button(b), x, y) {
-                self.pressed = Some(b);
-                let n = self.items.len();
-                if n > 0 {
-                    let i = match (self.current, b) {
-                        (None, Button::Prev) => n - 1,
-                        (None, _) => 0,
-                        (Some(c), Button::Prev) => (c + n - 1) % n,
-                        (Some(c), _) => (c + 1) % n,
-                    };
-                    self.load_item(model, i, out);
-                }
-                return;
-            }
+        if let Some((b, _)) = header_buttons().into_iter().find(|(_, r)| contains(r, x, y)) {
+            self.pressed = Some(b);
+            self.preset_button(app, model, b, out);
+            return;
         }
         self.scope_press = false;
         if contains(&scope_rect(), x, y) {
@@ -921,7 +1039,7 @@ impl SynthPanel {
                 let Kind::Choice(options) = PARAMS[p as usize].kind else { return };
                 let cur = self.patch.get(p).round() as usize;
                 app.open_menu(&anchor, options.iter().map(|s| s.to_string()).collect(), Some(cur));
-                self.menu = Some(p);
+                self.menu = Some(Menu::Choice(p));
             }
             Cell::Toggle(p) => {
                 let v = 1.0 - self.patch.get(p);
@@ -966,6 +1084,7 @@ impl SynthPanel {
                 self.patch = Patch::default();
                 self.commit(model, out);
                 self.current = self.matching();
+                self.loaded = self.current.map(|_| self.patch.clone());
                 self.reveal();
             }
             Button::Randomize => {
@@ -974,7 +1093,6 @@ impl SynthPanel {
                 randomize(&mut patch, &off, amount, &mut || self.rand());
                 self.patch = patch;
                 self.commit(model, out);
-                self.current = self.matching();
             }
             Button::Dice => {
                 for (cell, _) in layout().cells {
@@ -992,7 +1110,142 @@ impl SynthPanel {
             Button::Load => self.request = Some(Request::OpenPreset),
             Button::Save => self.request = Some(Request::SavePreset),
             Button::Close => self.close(),
-            Button::Prev | Button::Next => {}
+            Button::Prev | Button::Next | Button::PresetNew | Button::PresetSave | Button::PresetRename | Button::PresetDelete => {}
+        }
+    }
+
+    /// The selected preset when it is a user one: its index and file.
+    fn selected_user(&self) -> Option<(usize, PathBuf)> {
+        let i = self.current?;
+        match &self.items.get(i)?.source {
+            Source::File(f) => Some((i, f.clone())),
+            Source::Factory(_) => None,
+        }
+    }
+
+    fn preset_button(&mut self, app: &mut App, model: &mut Model, b: Button, out: &mut Vec<Command>) {
+        match b {
+            Button::Prev | Button::Next => {
+                let n = self.items.len();
+                if n > 0 {
+                    let i = match (self.current, b) {
+                        (None, Button::Prev) => n - 1,
+                        (None, _) => 0,
+                        (Some(c), Button::Prev) => (c + n - 1) % n,
+                        (Some(c), _) => (c + 1) % n,
+                    };
+                    self.load_item(model, i, out);
+                }
+            }
+            Button::PresetNew => self.new_preset(app),
+            Button::PresetSave => match self.selected_user() {
+                Some((_, f)) => match save_preset(&f, &self.patch) {
+                    Ok(()) => {
+                        self.status = format!("Saved {}", stem(&f));
+                        self.loaded = Some(self.patch.clone());
+                    }
+                    Err(e) => self.status = format!("Save failed: {e}"),
+                },
+                None => self.new_preset(app),
+            },
+            Button::PresetRename => match self.selected_user() {
+                Some((i, _)) => self.begin_rename(app, i),
+                None => self.status = "Select a user preset to rename".into(),
+            },
+            Button::PresetDelete => match self.selected_user() {
+                Some((i, _)) => {
+                    let anchor = self.panel_path().unwrap_or_default();
+                    app.open_menu(&anchor, vec![format!("Delete {}", self.items[i].name), "Cancel".into()], None);
+                    self.menu = Some(Menu::Delete(i));
+                }
+                None => self.status = "Select a user preset to delete".into(),
+            },
+            _ => {}
+        }
+    }
+
+    /// Saves the patch as a new user preset ("New Synth", "New Synth 2",
+    /// ...) and starts naming it.
+    fn new_preset(&mut self, app: &mut App) {
+        let dir = presets_dir();
+        let path = (1..).map(|n| dir.join(if n == 1 { format!("New Synth.{PRESET_EXT}") } else { format!("New Synth {n}.{PRESET_EXT}") })).find(|p| !p.exists()).expect("a free name");
+        if let Err(e) = save_preset(&path, &self.patch) {
+            self.status = format!("Save failed: {e}");
+            return;
+        }
+        self.items = preset_items();
+        self.current = self.items.iter().position(|it| it.source == Source::File(path.clone()));
+        self.loaded = self.current.map(|_| self.patch.clone());
+        self.reveal();
+        self.status = format!("Saved {}", stem(&path));
+        if let Some(i) = self.current {
+            self.begin_rename(app, i);
+        }
+    }
+
+    /// An edit box over preset `i`'s row.
+    fn begin_rename(&mut self, app: &mut App, i: usize) {
+        let Some(panel) = self.panel_path() else { return };
+        self.current = Some(i);
+        self.reveal();
+        let l = list_rect();
+        let y = l.y + (i - self.scroll) as f32 * ITEM_H;
+        let rect = Rect::new((l.x + 2.0) as i32, y as i32, (l.w - 60.0) as i32, ITEM_H as i32);
+        app.open_edit_box(&panel, PRESET_EDIT, rect, self.items[i].name.clone());
+        self.renaming = Some(i);
+    }
+
+    /// Closes the edit box; with `text`, renames the preset to it.
+    fn end_rename(&mut self, app: &mut App, text: Option<&str>) {
+        if let Some(c) = self.panel_path().and_then(|p| app.ctrl_mut(&p)) {
+            c.children.retain(|k| k.name != PRESET_EDIT);
+        }
+        let Some(i) = self.renaming.take() else { return };
+        let (Some(text), Some(Source::File(old))) = (text, self.items.get(i).map(|it| it.source.clone())) else { return };
+        let name = file_safe(text);
+        if name.is_empty() || name == stem(&old) {
+            return;
+        }
+        let new = old.with_file_name(format!("{name}.{PRESET_EXT}"));
+        // A case-only change is the same file on Windows and macOS.
+        let same = stem(&old).eq_ignore_ascii_case(&name);
+        if new.exists() && !same {
+            self.status = format!("{name} exists already");
+            return;
+        }
+        match std::fs::rename(&old, &new) {
+            Ok(()) => {
+                self.items = preset_items();
+                self.current = self.items.iter().position(|it| it.source == Source::File(new.clone()));
+                self.reveal();
+                self.status = format!("Renamed to {name}");
+            }
+            Err(e) => self.status = format!("Rename failed: {e}"),
+        }
+    }
+
+    fn delete_preset(&mut self, i: usize) {
+        let Some(Source::File(f)) = self.items.get(i).map(|it| it.source.clone()) else { return };
+        match std::fs::remove_file(&f) {
+            Ok(()) => {
+                self.items = preset_items();
+                self.current = self.matching();
+                self.loaded = self.current.map(|_| self.patch.clone());
+                self.reveal();
+                self.status = format!("Deleted {}", stem(&f));
+            }
+            Err(e) => self.status = format!("Delete failed: {e}"),
+        }
+    }
+
+    /// The live preview's finished renders, played while the knob still
+    /// turns (called as the editor collects its commands).
+    pub fn poll_preview(&mut self, out: &mut Vec<Command>) {
+        let Some(live) = self.live.as_mut() else { return };
+        if let Some(x) = live.poll() {
+            if self.audition && matches!(self.drag, Some((Drag::Param(_), ..))) {
+                out.push(Command::Preview(Some(Arc::new(dreist_dsp::voice::SampleData { left: x, right: None, sample_rate: dsp::RATE as f32 }))));
+            }
         }
     }
 
@@ -1001,14 +1254,33 @@ impl SynthPanel {
         if self.open.is_none() {
             return false;
         }
+        // An edit box closed without a commit (Escape): it goes.
+        if self.renaming.is_some() && !app.is_editing() && !matches!(ev, UiEvent::TextCommitted { .. }) {
+            self.end_rename(app, None);
+        }
         match ev {
+            UiEvent::TextCommitted { name, text, .. } if name == PRESET_EDIT => {
+                let text = text.clone();
+                self.end_rename(app, Some(&text));
+                true
+            }
             UiEvent::Mouse { path, overload, kind, x, y } if overload == OVERLOAD && self.mine(path) => {
                 match kind {
                     MouseKind::Down => self.press(app, model, *x, *y, out),
                     MouseKind::Drag => match self.drag {
                         Some((Drag::Param(p), y0, v0)) => {
                             let v = v0 + (y0 - y) / DRAG_RANGE;
-                            self.dragged |= self.set(p, v);
+                            if self.set(p, v) {
+                                self.dragged = true;
+                                if self.audition {
+                                    if self.live.is_none() {
+                                        self.live = Live::new();
+                                    }
+                                    if let Some(l) = self.live.as_mut() {
+                                        l.request(&self.patch);
+                                    }
+                                }
+                            }
                         }
                         Some((Drag::Amount, y0, v0)) => {
                             let v = (v0 + (y0 - y) / DRAG_RANGE).clamp(0.0, 1.0);
@@ -1021,11 +1293,14 @@ impl SynthPanel {
                         self.pressed = None;
                         self.scope_press = false;
                         let drag = self.drag.take();
+                        // The release's render plays now: no late preview.
+                        if let Some(l) = self.live.as_mut() {
+                            l.cancel();
+                        }
                         if std::mem::take(&mut self.dragged) {
                             match drag {
                                 Some((Drag::Param(_), ..)) => {
                                     self.commit(model, out);
-                                    self.current = self.matching();
                                 }
                                 Some((Drag::Amount, ..)) => self.save_random(),
                                 None => {}
@@ -1038,12 +1313,17 @@ impl SynthPanel {
             }
             UiEvent::DoubleClicked { path, .. } if self.panel_path().as_deref() == Some(path.as_slice()) => {
                 let (x, y) = self.last_down;
+                if contains(&list_rect(), x, y) {
+                    if let Some((i, _)) = self.selected_user() {
+                        self.begin_rename(app, i);
+                    }
+                    return true;
+                }
                 match Self::cell_at(x, y) {
                     Some((Cell::Knob(p), r)) if !contains(&dot_rect(&r), x, y) => {
                         self.drag = None;
                         if self.set(p, PARAMS[p as usize].default) {
                             self.commit(model, out);
-                            self.current = self.matching();
                         }
                     }
                     Some((Cell::Amount, _)) => {
@@ -1069,7 +1349,6 @@ impl SynthPanel {
                         let v = self.patch.get(p) + dy.signum() * 0.01;
                         if self.set(p, v) {
                             self.commit(model, out);
-                            self.current = self.matching();
                         }
                     }
                     Some((Cell::Amount, _)) => {
@@ -1085,11 +1364,14 @@ impl SynthPanel {
                 false
             }
             UiEvent::MenuSelected { anchor, index, .. } if self.panel_path().as_deref() == Some(anchor.as_slice()) => {
-                if let Some(p) = self.menu.take() {
-                    if self.set(p, *index as f32) {
-                        self.commit(model, out);
-                        self.current = self.matching();
+                match self.menu.take() {
+                    Some(Menu::Choice(p)) => {
+                        if self.set(p, *index as f32) {
+                            self.commit(model, out);
+                        }
                     }
+                    Some(Menu::Delete(i)) if *index == 0 => self.delete_preset(i),
+                    _ => {}
                 }
                 true
             }
@@ -1228,10 +1510,12 @@ impl SynthPanel {
         let s = presets_rect();
         p.fill_rounded(s, 4.0, [true; 4], SECTION);
         p.text(RectF::new(s.x + PAD, s.y + 2.0, s.w - 2.0 * PAD, 16.0), "PRESETS", ACCENT, font, HAlign::Left, VAlign::Center);
-        for b in [Button::Prev, Button::Next] {
-            let r = header_button(b);
+        let user = self.selected_user().is_some();
+        for (b, r) in header_buttons() {
             p.fill_rounded(r, 3.0, [true; 4], if self.pressed == Some(b) { PRESSED } else { TRACK });
-            p.text(r, b.label(), TEXT, font, HAlign::Center, VAlign::Center);
+            // Rename and Delete act on user presets only.
+            let off = matches!(b, Button::PresetRename | Button::PresetDelete) && !user;
+            p.text(r, b.label(), if off { DIM } else { TEXT }, font, HAlign::Center, VAlign::Center);
         }
         let list = list_rect();
         p.fill_rounded(list, 3.0, [true; 4], WELL);
@@ -1242,7 +1526,9 @@ impl SynthPanel {
                 p.fill_rect(r, TRACK);
             }
             let text = RectF::new(r.x + 6.0, r.y, r.w - 12.0, r.h);
-            p.text(text, &item.name, if cur { ACCENT } else { TEXT }, font, HAlign::Left, VAlign::Center);
+            // The selected preset, edited since: marked.
+            let name = if cur && self.loaded.as_ref() != Some(&self.patch) { format!("{} *", item.name) } else { item.name.clone() };
+            p.text(text, &name, if cur { ACCENT } else { TEXT }, font, HAlign::Left, VAlign::Center);
             let tag = if matches!(item.source, Source::Factory(_)) { "Factory" } else { "User" };
             p.text(text, tag, DIM, font, HAlign::Right, VAlign::Center);
         }

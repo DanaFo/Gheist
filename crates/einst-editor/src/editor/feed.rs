@@ -259,6 +259,7 @@ impl Editor {
     }
 
     pub fn take_commands(&mut self) -> Vec<Command> {
+        self.synth.poll_preview(&mut self.outbox);
         if let Some(b) = self.browser.as_mut() {
             if b.poll_preview(&mut self.outbox) {
                 self.app.dirty = true;
