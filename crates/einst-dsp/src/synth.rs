@@ -2,15 +2,20 @@
 //! render like any other sample.
 //!
 //! - Osc 1 and Osc 2 (sine, square, saw, supersaw) with Osc 2 cross-modulating
-//!   Osc 1; Osc 3 is an FM operator (sine, square, triangle, saw) aimed at
-//!   Osc 1, Osc 2 and the cutoff.
+//!   Osc 1 (Osc 2 also plays white, pink or brown noise); each has a pitch AD
+//!   envelope. Osc 3 is an FM operator (sine, square, triangle, saw, noise)
+//!   aimed at Osc 1, Osc 2 and the cutoff, its depth shaped by an AD
+//!   envelope.
+//! - A noise source blends white to pink to brown and joins before or after
+//!   the filter.
 //! - Each oscillator goes through its own mixer channel, which overdrives
 //!   asymmetrically above unity.
 //! - The filter is two state-variable low-passes whose peaks sit `spread`
 //!   octaves apart, with a pre drive and a post clip. Resonance reaches
 //!   self-oscillation (a sine) at 80 %; the last 20 % soft-clip it. Mix
 //!   blends the filter's input back in before the post clip.
-//! - Two AD envelopes (amp, filter) and one LFO with a toggle per target.
+//! - Two AD envelopes (amp, filter) and one LFO with a toggle and a
+//!   unipolar / bipolar switch per target.
 //!
 //! [`render`] runs at twice [`RATE`] and decimates; the same patch always
 //! renders the same samples.
@@ -46,12 +51,14 @@ pub struct ParamInfo {
     pub default: f32,
 }
 
-/// Oscillator waves.
+/// Osc 1's waves.
 pub const WAVES: &[&str] = &["Sine", "Square", "Saw", "Supersaw"];
+/// Osc 2's waves: Osc 1's and noises.
+pub const OSC2_WAVES: &[&str] = &["Sine", "Square", "Saw", "Supersaw", "White", "Pink", "Brown"];
 /// LFO shapes.
 pub const LFO_SHAPES: &[&str] = &["Sine", "Triangle", "Saw", "Square", "S&H"];
 /// Osc 3's waves.
-pub const OSC3_WAVES: &[&str] = &["Sine", "Square", "Triangle", "Saw"];
+pub const OSC3_WAVES: &[&str] = &["Sine", "Square", "Triangle", "Saw", "Noise"];
 
 macro_rules! params {
     ($($name:ident = $id:literal, $label:literal, $kind:expr, $default:expr;)*) => {
@@ -74,17 +81,29 @@ params! {
     Osc1Fine = "osc1_fine", "Fine", Kind::Knob, 0.5;
     Osc1Shape = "osc1_shape", "Shape", Kind::Knob, 0.0;
     Osc1Level = "osc1_level", "Level", Kind::Knob, 0.5;
-    Osc2Wave = "osc2_wave", "Wave", Kind::Choice(WAVES), 1.0;
+    Osc1PitchAttack = "osc1_pitch_attack", "Attack", Kind::Knob, 0.0;
+    Osc1PitchDecay = "osc1_pitch_decay", "Decay", Kind::Knob, 0.5;
+    Osc1PitchAmount = "osc1_pitch_amount", "Amount", Kind::Knob, 0.5;
+    Osc2Wave = "osc2_wave", "Wave", Kind::Choice(OSC2_WAVES), 1.0;
     Osc2Coarse = "osc2_coarse", "Coarse", Kind::Knob, 0.5;
     Osc2Fine = "osc2_fine", "Fine", Kind::Knob, 0.5;
     Osc2Shape = "osc2_shape", "Shape", Kind::Knob, 0.0;
     Osc2Level = "osc2_level", "Level", Kind::Knob, 0.0;
+    Osc2PitchAttack = "osc2_pitch_attack", "Attack", Kind::Knob, 0.0;
+    Osc2PitchDecay = "osc2_pitch_decay", "Decay", Kind::Knob, 0.5;
+    Osc2PitchAmount = "osc2_pitch_amount", "Amount", Kind::Knob, 0.5;
     XMod = "xmod", "X-Mod", Kind::Knob, 0.0;
     Osc3Wave = "osc3_wave", "Wave", Kind::Choice(OSC3_WAVES), 0.0;
     Osc3Ratio = "osc3_ratio", "Ratio", Kind::Knob, 1.0 / 3.0;
     Osc3ToOsc1 = "osc3_osc1", "> Osc 1", Kind::Knob, 0.0;
     Osc3ToOsc2 = "osc3_osc2", "> Osc 2", Kind::Knob, 0.0;
     Osc3ToFilter = "osc3_filter", "> Filter", Kind::Knob, 0.0;
+    Osc3EnvAttack = "osc3_env_attack", "Attack", Kind::Knob, 0.0;
+    Osc3EnvDecay = "osc3_env_decay", "Decay", Kind::Knob, 0.6;
+    Osc3EnvAmount = "osc3_env_amount", "Amount", Kind::Knob, 0.0;
+    NoiseColour = "noise_colour", "Colour", Kind::Knob, 0.0;
+    NoiseLevel = "noise_level", "Level", Kind::Knob, 0.0;
+    NoisePost = "noise_post", "Post", Kind::Toggle, 0.0;
     Cutoff = "cutoff", "Cutoff", Kind::Knob, 0.7;
     Resonance = "resonance", "Reso", Kind::Knob, 0.3;
     Spread = "spread", "Spread", Kind::Knob, 0.0;
@@ -104,6 +123,11 @@ params! {
     LfoCutoff = "lfo_cutoff", "Cutoff", Kind::Toggle, 0.0;
     LfoResonance = "lfo_resonance", "Reso", Kind::Toggle, 0.0;
     LfoSpread = "lfo_spread", "Spread", Kind::Toggle, 0.0;
+    LfoOsc1Bi = "lfo_osc1_bi", "Bi", Kind::Toggle, 1.0;
+    LfoOsc2Bi = "lfo_osc2_bi", "Bi", Kind::Toggle, 1.0;
+    LfoCutoffBi = "lfo_cutoff_bi", "Bi", Kind::Toggle, 1.0;
+    LfoResonanceBi = "lfo_resonance_bi", "Bi", Kind::Toggle, 1.0;
+    LfoSpreadBi = "lfo_spread_bi", "Bi", Kind::Toggle, 1.0;
     Volume = "volume", "Volume", Kind::Knob, 0.6;
 }
 
@@ -182,7 +206,7 @@ impl Patch {
 
 /// Bumped when a change to the renderer changes its output, so old renders
 /// are not reused.
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const FADE: f32 = 0.005;
 
 fn clamp(p: P, x: f32) -> f32 {
@@ -225,6 +249,17 @@ fn lfo_hz(x: f32) -> f32 {
     0.05 * 600f32.powf(x)
 }
 
+/// LFO depth eases in: the first quarter of the knob reaches about 10 %.
+pub fn lfo_depth(x: f32) -> f32 {
+    x.max(0.0).powf(1.66)
+}
+
+/// A pitch envelope's amount in semitones: ±48, finer near the centre.
+fn pitch_amount(x: f32) -> f32 {
+    let u = 2.0 * x - 1.0;
+    u * u.abs() * 48.0
+}
+
 /// Octaves between the two filter peaks.
 fn spread_octaves(x: f32) -> f32 {
     x * 4.0
@@ -245,16 +280,25 @@ pub fn display(p: P, v: f32) -> String {
         Osc1Coarse | Osc2Coarse => format!("{:+} st", ((v - 0.5) * 48.0).round() as i32),
         Osc1Fine | Osc2Fine => format!("{:+} ct", ((v - 0.5) * 200.0).round() as i32),
         Osc3Ratio => format!("x{:.2}", ratio(v)),
+        Osc1PitchAmount | Osc2PitchAmount => format!("{:+.1} st", pitch_amount(v)),
+        LfoDepth => format!("{:.0} %", lfo_depth(v) * 100.0),
+        NoiseColour => match v {
+            v if v < 0.17 => "White".into(),
+            v if v < 0.42 => "White-Pink".into(),
+            v if v < 0.58 => "Pink".into(),
+            v if v < 0.83 => "Pink-Brown".into(),
+            _ => "Brown".into(),
+        },
         Cutoff => hz(cutoff_hz(v)),
         Spread => format!("{:.1} oct", spread_octaves(v)),
         FilterEnv => format!("{:+.1} oct", (v - 0.5) * 12.0),
-        AmpAttack | FilterAttack => {
+        AmpAttack | FilterAttack | Osc1PitchAttack | Osc2PitchAttack | Osc3EnvAttack => {
             let s = attack_time(v);
             if s < 0.01 { format!("{:.1} ms", s * 1000.0) } else { ms(s) }
         }
-        AmpDecay | FilterDecay => ms(decay_time(v)),
+        AmpDecay | FilterDecay | Osc1PitchDecay | Osc2PitchDecay | Osc3EnvDecay => ms(decay_time(v)),
         LfoRate => format!("{:.2} Hz", lfo_hz(v)),
-        Osc1Level | Osc2Level => {
+        Osc1Level | Osc2Level | NoiseLevel => {
             let g = level_gain(v);
             if g <= 0.0 { "-inf dB".into() } else { format!("{:+.1} dB", 20.0 * g.log10()) }
         }
@@ -319,6 +363,42 @@ fn fold(x: f32) -> f32 {
     4.0 * (wrap((x - 1.0) / 4.0) - 0.5).abs() - 1.0
 }
 
+/// White, pink and brown noise, each about ±1 at its peaks.
+struct Noise {
+    seed: u32,
+    pink: [f32; 7],
+    brown: f32,
+}
+
+impl Noise {
+    fn new(seed: u32) -> Noise {
+        Noise { seed, pink: [0.0; 7], brown: 0.0 }
+    }
+
+    fn tick(&mut self) -> [f32; 3] {
+        self.seed = self.seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let w = (self.seed >> 8) as f32 / (1u32 << 23) as f32 - 1.0;
+        // Pink: a sum of one-pole filters (-3 dB per octave).
+        let b = &mut self.pink;
+        b[0] = 0.99886 * b[0] + w * 0.055_517_9;
+        b[1] = 0.99332 * b[1] + w * 0.075_075_9;
+        b[2] = 0.96900 * b[2] + w * 0.153_852;
+        b[3] = 0.86650 * b[3] + w * 0.310_485_6;
+        b[4] = 0.55000 * b[4] + w * 0.532_952_2;
+        b[5] = -0.7616 * b[5] - w * 0.016_898;
+        let pink = (b[0] + b[1] + b[2] + b[3] + b[4] + b[5] + b[6] + w * 0.5362) * 0.11;
+        b[6] = w * 0.115_926;
+        // Brown: leaky integrated white (-6 dB per octave).
+        self.brown = (self.brown + 0.02 * w) / 1.02;
+        [w, pink, self.brown * 3.5]
+    }
+}
+
+/// White (0) through pink (0.5) to brown (1).
+fn colour(c: f32, n: [f32; 3]) -> f32 {
+    if c < 0.5 { n[0] + (n[1] - n[0]) * c * 2.0 } else { n[1] + (n[2] - n[1]) * (c - 0.5) * 2.0 }
+}
+
 const SUPER: usize = 7;
 const SUPER_SPREAD: [f32; SUPER] = [-1.0, -0.62, -0.28, 0.0, 0.3, 0.6, 1.0];
 
@@ -328,6 +408,7 @@ struct Osc {
     /// The supersaw voices' pitch ratios.
     ratios: [f32; SUPER],
     last: f32,
+    noise: Noise,
 }
 
 impl Osc {
@@ -341,7 +422,7 @@ impl Osc {
         }
         let detune = shape * shape * 0.6 + 0.04;
         let ratios = SUPER_SPREAD.map(|s| 2f32.powf(s * detune / 12.0));
-        Osc { phase: 0.0, supers, ratios, last: 0.0 }
+        Osc { phase: 0.0, supers, ratios, last: 0.0, noise: Noise::new(seed.wrapping_mul(7919)) }
     }
 
     /// One sample of `wave` at `inc` cycles per sample, phase-modulated by
@@ -365,7 +446,7 @@ impl Osc {
                 let tri = 1.0 - 4.0 * (p - 0.5).abs();
                 (1.0 - shape) * saw(p, dt) + shape * tri
             }
-            _ => {
+            3 => {
                 let mut sum = 0.0;
                 for (i, sp) in self.supers.iter_mut().enumerate() {
                     let r = self.ratios[i];
@@ -376,6 +457,8 @@ impl Osc {
                 }
                 sum * 0.35
             }
+            // White, pink, brown.
+            w => self.noise.tick()[(w - 4).min(2)],
         }
     }
 }
@@ -492,21 +575,27 @@ pub fn render(patch: &Patch) -> Vec<f32> {
     let pm3 = [g(Osc3ToOsc1), g(Osc3ToOsc2)].map(|a| a * a * 2.0);
     let fm3 = g(Osc3ToFilter) * g(Osc3ToFilter) * 4.0;
     let env_oct = (g(FilterEnv) - 0.5) * 12.0;
+    let penv = [(Osc1PitchAttack, Osc1PitchDecay), (Osc2PitchAttack, Osc2PitchDecay), (Osc3EnvAttack, Osc3EnvDecay)].map(|(a, d)| Ad { a: attack_time(g(a)), d: decay_time(g(d)) });
+    let (pa1, pa2) = (pitch_amount(g(Osc1PitchAmount)), pitch_amount(g(Osc2PitchAmount)));
+    let env3 = g(Osc3EnvAmount);
+    let (n_colour, n_level, n_post) = (g(NoiseColour), level_gain(g(NoiseLevel)), patch.on(NoisePost));
     let pre = drive_gain(g(Drive));
     let post = drive_gain(g(Clip));
     let amp = Ad { a: attack_time(g(AmpAttack)), d: decay_time(g(AmpDecay)) };
     let fenv = Ad { a: attack_time(g(FilterAttack)), d: decay_time(g(FilterDecay)) };
     let lfo_shape = patch.choice(LfoShape);
     let lfo_inc = lfo_hz(g(LfoRate)) / fs;
-    let depth = g(LfoDepth);
-    let to = |p| if patch.on(p) { depth } else { 0.0 };
-    let (lo1, lo2, lcut, lres, lspread) = (to(LfoOsc1), to(LfoOsc2), to(LfoCutoff), to(LfoResonance), to(LfoSpread));
+    let depth = lfo_depth(g(LfoDepth));
+    // Each target's depth and whether it swings both ways.
+    let to = |p, bi| (if patch.on(p) { depth } else { 0.0 }, patch.on(bi));
+    let targets = [to(LfoOsc1, LfoOsc1Bi), to(LfoOsc2, LfoOsc2Bi), to(LfoCutoff, LfoCutoffBi), to(LfoResonance, LfoResonanceBi), to(LfoSpread, LfoSpreadBi)];
     let volume = volume_gain(g(Volume));
 
     let (mut o1, mut o2) = (Osc::new(1, g(Osc1Shape)), Osc::new(2, g(Osc2Shape)));
     // Osc 3 as an oscillator wave and shape: the triangle is the saw's
     // full triangle blend.
-    let (w3, sh3) = [(0, 0.0), (1, 0.0), (2, 1.0), (2, 0.0)][patch.choice(Osc3Wave).min(3)];
+    let (w3, sh3) = [(0, 0.0), (1, 0.0), (2, 1.0), (2, 0.0), (4, 0.0)][patch.choice(Osc3Wave).min(4)];
+    let mut noise_src = Noise::new(5);
     let mut o3 = Osc::new(3, 0.0);
     let mix = g(FilterMix);
     let mut lfo = Lfo { phase: 0.0, held: 0.0, seed: 3 };
@@ -520,29 +609,33 @@ pub fn render(patch: &Patch) -> Vec<f32> {
     for i in 0..n {
         let t = i as f32 / fs;
         let l = lfo.tick(lfo_shape, lfo_inc);
-        let m3 = o3.tick(w3, f3 / fs, 0.0, sh3);
-        let inc1 = note_hz(s1 + l * lo1 * 12.0) / fs;
-        let inc2 = note_hz(s2 + l * lo2 * 12.0) / fs;
+        // Each target's LFO: -1..1, or 0..1 when unipolar.
+        let [lo1, lo2, lcut, lres, lspread] = targets.map(|(d, bi)| d * if bi { l } else { 0.5 * (l + 1.0) });
+        let depth3 = 1.0 - env3 + env3 * penv[2].at(t);
+        let m3 = o3.tick(w3, f3 / fs, 0.0, sh3) * depth3;
+        let inc1 = note_hz(s1 + lo1 * 12.0 + pa1 * penv[0].at(t)) / fs;
+        let inc2 = note_hz(s2 + lo2 * 12.0 + pa2 * penv[1].at(t)) / fs;
         let y2 = o2.tick(w2, inc2, pm3[1] * m3, g(Osc2Shape));
         let y1 = o1.tick(w1, inc1, pm3[0] * m3 + xmod * last2, g(Osc1Shape));
         last2 = y2;
-        let mixed = channel(y1 * l1) + channel(y2 * l2);
+        let nz = if n_level > 0.0 { channel(colour(n_colour, noise_src.tick()) * n_level) } else { 0.0 };
+        let mixed = channel(y1 * l1) + channel(y2 * l2) + if n_post { 0.0 } else { nz };
         // The channels' asymmetry leaves an offset: a 10 Hz high-pass.
         dc_y = mixed - dc_x + dc_r * dc_y;
         dc_x = mixed;
         noise = noise.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         let x = soft(dc_y, pre) + (noise >> 9) as f32 * 1e-12;
-        let oct = env_oct * fenv.at(t) + lcut * l * 4.0 + fm3 * m3;
+        let oct = env_oct * fenv.at(t) + lcut * 4.0 + fm3 * m3;
         let fc = cutoff_hz(g(Cutoff)) * 2f32.powf(oct);
-        let half = 0.5 * (spread_octaves(g(Spread)) + lspread * l * 2.0).max(0.0);
-        let r = (g(Resonance) + lres * l * 0.4).clamp(0.0, 1.0);
+        let half = 0.5 * (spread_octaves(g(Spread)) + lspread * 2.0).max(0.0);
+        let r = (g(Resonance) + lres * 0.4).clamp(0.0, 1.0);
         let k = damping(r);
         let gain = |f: f32| (PI * f.clamp(10.0, 0.45 * fs) / fs).tan();
         let a = f1.lowpass(x, gain(fc * 2f32.powf(-half)), k);
         let b = f2.lowpass(x, gain(fc * 2f32.powf(half)), k);
         let rc = reso_clip(r);
         let y = 0.5 * (soft(a, rc) + soft(b, rc));
-        let y = x + mix * (y - x);
+        let y = x + mix * (y - x) + if n_post { nz } else { 0.0 };
         let mut y = soft(y, post) * amp.at(t) * volume;
         if i >= fade_from {
             y *= (n - i) as f32 / (n - fade_from) as f32;
@@ -751,6 +844,137 @@ mod tests {
         let half = energy(&render(&p));
         assert!(dry > closed * 20.0, "dry {dry} closed {closed}");
         assert!(half > closed && half < dry);
+    }
+
+    fn energy(x: &[f32]) -> f32 {
+        x.iter().map(|v| v * v).sum::<f32>() / x.len().max(1) as f32
+    }
+
+    /// How much of `x` is high frequencies: the energy of its first
+    /// difference over its own.
+    fn brightness(x: &[f32]) -> f32 {
+        let d: Vec<f32> = x.windows(2).map(|w| w[1] - w[0]).collect();
+        energy(&d) / energy(x)
+    }
+
+    /// A pitch envelope sweeps the oscillator down to its pitch, as a kick.
+    #[test]
+    fn pitch_envelopes_sweep() {
+        let mut p = Patch::default();
+        p.set(P::Osc1Wave, 0.0);
+        p.set(P::Cutoff, 1.0);
+        p.set(P::AmpDecay, 1.0);
+        p.set(P::Osc1PitchAmount, 1.0);
+        p.set(P::Osc1PitchDecay, 0.6);
+        let x = render(&p);
+        let early = crossings_hz(&x[..RATE as usize / 50]);
+        let late = crossings_hz(&x[RATE as usize..RATE as usize + RATE as usize / 5]);
+        assert!((late - 130.8).abs() < 10.0, "settles at the note: {late}");
+        assert!(early > late * 4.0, "starts high: {early}");
+        // Osc 2's envelope moves Osc 2 only.
+        p.set(P::Osc1PitchAmount, 0.5);
+        let plain = render(&p);
+        p.set(P::Osc2PitchAmount, 1.0);
+        assert_eq!(render(&p), plain, "Osc 2 is silent");
+    }
+
+    /// Osc 3's depth envelope fades its FM: late in the note the sound
+    /// matches the unmodulated one.
+    #[test]
+    fn osc3_depth_follows_its_envelope() {
+        let mut p = Patch::default();
+        p.set(P::Osc1Wave, 0.0);
+        p.set(P::Cutoff, 1.0);
+        p.set(P::AmpDecay, 1.0);
+        let plain = render(&p);
+        p.set(P::Osc3ToOsc1, 0.8);
+        p.set(P::Osc3Ratio, 0.5);
+        let always = render(&p);
+        p.set(P::Osc3EnvAmount, 1.0);
+        p.set(P::Osc3EnvDecay, 0.3);
+        let shaped = render(&p);
+        let late = RATE as usize..RATE as usize + 4800;
+        let diff = |a: &[f32], b: &[f32]| energy(&a.iter().zip(b).map(|(x, y)| x - y).collect::<Vec<_>>());
+        let base = energy(&plain[late.clone()]);
+        assert!(diff(&always[late.clone()], &plain[late.clone()]) > base * 0.1);
+        assert!(diff(&shaped[late.clone()], &plain[late.clone()]) < base * 1e-4, "the FM has gone");
+        assert_ne!(shaped[..2400], plain[..2400], "early on it modulates");
+    }
+
+    /// White is brighter than pink, pink than brown, from the noise source
+    /// and from Osc 2's noise waves.
+    #[test]
+    fn noise_colours_darken() {
+        let mut p = Patch::default();
+        p.set(P::Osc1Level, 0.0);
+        p.set(P::Cutoff, 1.0);
+        p.set(P::Resonance, 0.0);
+        p.set(P::AmpDecay, 1.0);
+        p.set(P::NoiseLevel, 0.5);
+        let b: Vec<f32> = [0.0, 0.5, 1.0]
+            .map(|c| {
+                p.set(P::NoiseColour, c);
+                let x = render(&p);
+                assert!(energy(&x) > 1e-4, "colour {c} sounds");
+                brightness(&x[..RATE as usize / 2])
+            })
+            .to_vec();
+        assert!(b[0] > b[1] * 1.5 && b[1] > b[2] * 1.5, "{b:?}");
+        p.set(P::NoiseLevel, 0.0);
+        p.set(P::Osc2Level, 0.5);
+        let w: Vec<f32> = [4.0, 5.0, 6.0]
+            .map(|w| {
+                p.set(P::Osc2Wave, w);
+                brightness(&render(&p)[..RATE as usize / 2])
+            })
+            .to_vec();
+        assert!(w[0] > w[1] && w[1] > w[2], "{w:?}");
+    }
+
+    /// Post-filter noise skips the filter: a closed filter only hides the
+    /// pre-filter noise.
+    #[test]
+    fn noise_joins_before_or_after_the_filter() {
+        let mut p = Patch::default();
+        p.set(P::Osc1Level, 0.0);
+        p.set(P::Cutoff, 0.0);
+        p.set(P::Resonance, 0.0);
+        p.set(P::NoiseLevel, 0.5);
+        let pre = energy(&render(&p));
+        p.set(P::NoisePost, 1.0);
+        let post = energy(&render(&p));
+        assert!(post > pre * 50.0, "pre {pre} post {post}");
+    }
+
+    #[test]
+    fn lfo_depth_eases_in() {
+        assert!((lfo_depth(0.25) - 0.1).abs() < 0.01);
+        assert!((lfo_depth(1.0) - 1.0).abs() < 1e-6);
+        assert_eq!(display(P::LfoDepth, 0.25), "10 %");
+    }
+
+    /// A unipolar target only moves one way: the cutoff only opens.
+    #[test]
+    fn unipolar_targets_move_one_way() {
+        let mut p = Patch::default();
+        p.set(P::Cutoff, 0.3);
+        p.set(P::Resonance, 0.0);
+        p.set(P::AmpDecay, 1.0);
+        p.set(P::LfoShape, 3.0);
+        // A 1 Hz square: low from 0.5 s to 1 s.
+        p.set(P::LfoRate, 20f32.ln() / 600f32.ln());
+        p.set(P::LfoDepth, 1.0);
+        p.set(P::LfoCutoff, 1.0);
+        let bi = render(&p);
+        p.set(P::LfoCutoffBi, 0.0);
+        let uni = render(&p);
+        p.set(P::LfoCutoff, 0.0);
+        let none = render(&p);
+        // The square's low half: bipolar closes the filter, unipolar leaves it.
+        let low = RATE as usize * 3 / 4..RATE as usize;
+        let e = |x: &[f32]| energy(&x[low.clone()]);
+        assert!(e(&bi) < e(&none) * 0.8, "bipolar closes: {} {}", e(&bi), e(&none));
+        assert!((e(&uni) / e(&none) - 1.0).abs() < 0.05, "unipolar stays: {} {}", e(&uni), e(&none));
     }
 
     #[test]

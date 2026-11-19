@@ -919,6 +919,7 @@ dependencies = [
  "dreist-gui",
  "dreist-host",
  "einst",
+ "einst-dsp",
  "einst-editor",
  "einst-formats",
  "nih_plug",

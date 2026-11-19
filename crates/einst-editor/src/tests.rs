@@ -5026,8 +5026,8 @@ fn synth_panel_renders_onto_the_layer() {
     assert_eq!(ed.synth.open, Some((e, pad, 2)));
     let panel = ed.synth.panel_path().unwrap();
     assert!(ed.app.ctrl(&panel[..panel.len() - 1]).is_some_and(|o| o.visible), "the overlay shows");
-    // Drag the cutoff knob (third row, first cell) down.
-    let (x, y) = (10.0 + 8.0 + 28.0, 28.0 + 6.0 + 2.0 * 100.0 + 16.0 + 30.0);
+    // Drag the cutoff knob down.
+    let (x, y) = crate::synth::knob_centre(einst_dsp::synth::P::Cutoff);
     let ev = |kind, y: f32| UiEvent::Mouse { path: panel.clone(), overload: crate::synth::OVERLOAD.into(), kind, x, y };
     ed.take_commands();
     ed.handle(&ev(MouseKind::Down, y));
@@ -5065,8 +5065,7 @@ fn synth_panel_repaints_its_knobs() {
     ed.render_frame(1.0);
     let panel = ed.synth.panel_path().unwrap();
     let (px, py) = ed.app.origin(&panel);
-    // Osc 1's Coarse knob (first row, second cell).
-    let (x, y) = (10.0 + 8.0 + 76.0 + 28.0, 28.0 + 6.0 + 16.0 + 30.0);
+    let (x, y) = crate::synth::knob_centre(einst_dsp::synth::P::Osc1Coarse);
     let crop = |pm: &dreist_gui::tiny_skia::Pixmap| -> Vec<u8> {
         let mut v = Vec::new();
         for yy in (py + y as i32 - 20)..(py + y as i32 + 30) {

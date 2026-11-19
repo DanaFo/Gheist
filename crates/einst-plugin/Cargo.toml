@@ -33,6 +33,7 @@ dreist-host = { workspace = true, features = ["session"] }
 [dev-dependencies]
 # nih-plug's CLAP bindings (the same revision), to host the plugin in tests.
 dreist-host = { workspace = true, features = ["clap-sys"] }
+einst-dsp = { path = "../einst-dsp" }
 
 [lints]
 workspace = true
